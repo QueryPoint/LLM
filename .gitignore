@@ -2,8 +2,12 @@
 __pycache__/
 *.py[cod]
 *.so
-*.egg
-*.egg-info/
+
+# Distribution / packaging
+.Python
+.idea/
+build/
+develop-eggs/
 dist/
 build/
 .eggs/

@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     app_port: int = 8001
     log_level: str = "INFO"
     internal_service_token: str = "change-me"
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    rabbitmq_back_to_llm_queue: str = "back_to_llm"
+    rabbitmq_llm_to_back_queue: str = "llm_to_back"
+    rabbitmq_prefetch_count: int = 1
+    rabbitmq_requeue_delay_seconds: float = 1.0
 
 
 settings = Settings()
