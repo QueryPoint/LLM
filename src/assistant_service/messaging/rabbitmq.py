@@ -86,34 +86,34 @@ class RabbitMQWorker:
             self._connection = await aio_pika.connect_robust(
                 self._settings.rabbitmq_url,
             )
+
+            logger.info("RabbitMQ connected")
+            self._channel = await self._connection.channel()
+            await self._channel.set_qos(
+                prefetch_count=self._settings.rabbitmq_prefetch_count,
+            )
+
+            self._queue = await self._channel.declare_queue(
+                self._settings.rabbitmq_back_to_llm_queue,
+                durable=True,
+            )
+            await self._channel.declare_queue(
+                self._settings.rabbitmq_llm_to_back_queue,
+                durable=True,
+            )
+
+            self.publisher = RabbitMQPublisher(
+                channel=self._channel,
+                default_routing_key=self._settings.rabbitmq_llm_to_back_queue,
+            )
+            self._consumer_tag = await self._queue.consume(
+                self._handle_message,
+                no_ack=False,
+            )
         except Exception:
-            logger.exception("RabbitMQ connection failed")
+            logger.exception("RabbitMQ startup failed")
             await self.stop()
-            return
-
-        logger.info("RabbitMQ connected")
-        self._channel = await self._connection.channel()
-        await self._channel.set_qos(
-            prefetch_count=self._settings.rabbitmq_prefetch_count,
-        )
-
-        self._queue = await self._channel.declare_queue(
-            self._settings.rabbitmq_back_to_llm_queue,
-            durable=True,
-        )
-        await self._channel.declare_queue(
-            self._settings.rabbitmq_llm_to_back_queue,
-            durable=True,
-        )
-
-        self.publisher = RabbitMQPublisher(
-            channel=self._channel,
-            default_routing_key=self._settings.rabbitmq_llm_to_back_queue,
-        )
-        self._consumer_tag = await self._queue.consume(
-            self._handle_message,
-            no_ack=False,
-        )
+            raise
 
         logger.info(
             "RabbitMQ consumer started: queue=%s",

@@ -1,7 +1,15 @@
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+
+from assistant_service.core.enums import (
+    AssistantMode,
+    IncomingMessageType,
+    OutgoingEventType,
+    RetrievalStatus,
+    ThinkStage,
+)
 
 
 class StrictBaseModel(BaseModel):
@@ -10,30 +18,34 @@ class StrictBaseModel(BaseModel):
 
 class DocumentChunk(StrictBaseModel):
     chunk_id: UUID
-    page_number: int
+    document_id: UUID
+    file_name: str
+    page: int | None = None
     text: str
+    score: float | None = None
 
 
 class DocumentContext(StrictBaseModel):
-    file_name: str
+    retrieval_status: RetrievalStatus
     chunks: list[DocumentChunk] = Field(default_factory=list)
 
 
 class PromptRequestMessage(StrictBaseModel):
-    type: Literal["prompt"]
-    request_id: UUID
+    type: Literal[IncomingMessageType.PROMPT]
+    request_id: UUID | None = None
     user_id: UUID
-    session_id: UUID
+    session_id: UUID | None = None
     prompt: str
     doc: UUID | None = None
+    mode: AssistantMode | None = None
     document_context: DocumentContext | None = None
 
 
 class DeleteRequestMessage(StrictBaseModel):
-    type: Literal["delete"]
-    request_id: UUID
+    type: Literal[IncomingMessageType.DELETE]
+    request_id: UUID | None = None
     user_id: UUID
-    session_id: UUID
+    session_id: UUID | None = None
 
 
 IncomingMessage = Annotated[
@@ -42,15 +54,25 @@ IncomingMessage = Annotated[
 ]
 
 
+class Source(StrictBaseModel):
+    document_id: UUID
+    file_name: str
+    page: int | None = None
+    chunk_id: UUID
+    text: str
+    score: float | None = None
+
+
 class DoneEventData(StrictBaseModel):
     answer: str
-    sources: list[dict[str, Any]] = Field(default_factory=list)
+    sources: list[Source] = Field(default_factory=list)
 
 
 class ThinkEvent(StrictBaseModel):
     request_id: UUID
     user_id: UUID
-    type: Literal["think"]
+    type: Literal[OutgoingEventType.THINK]
+    stage: ThinkStage
     data: str
     warning: int = Field(default=0, ge=0, le=100)
 
@@ -58,7 +80,7 @@ class ThinkEvent(StrictBaseModel):
 class TokenEvent(StrictBaseModel):
     request_id: UUID
     user_id: UUID
-    type: Literal["token"]
+    type: Literal[OutgoingEventType.TOKEN]
     data: str
     warning: int = Field(default=0, ge=0, le=100)
 
@@ -66,7 +88,7 @@ class TokenEvent(StrictBaseModel):
 class DoneEvent(StrictBaseModel):
     request_id: UUID
     user_id: UUID
-    type: Literal["done"]
+    type: Literal[OutgoingEventType.DONE]
     data: DoneEventData
     warning: int = Field(default=0, ge=0, le=100)
 
@@ -74,7 +96,7 @@ class DoneEvent(StrictBaseModel):
 class ErrorEvent(StrictBaseModel):
     request_id: UUID
     user_id: UUID
-    type: Literal["error"]
+    type: Literal[OutgoingEventType.ERROR]
     data: str
     warning: int = Field(default=0, ge=0, le=100)
 
