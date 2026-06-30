@@ -4,6 +4,7 @@ from uuid import UUID
 
 from assistant_service.agents.answer_agent import AnswerAgent
 from assistant_service.agents.context_agent import ContextAgent
+from assistant_service.agents.document_summary_agent import DocumentSummaryAgent
 from assistant_service.agents.intent_agent import IntentAgent
 from assistant_service.core.enums import (
     AssistantMode,
@@ -20,6 +21,7 @@ from assistant_service.messaging.contracts import (
     ThinkEvent,
 )
 from assistant_service.services.response_builder import (
+    build_summary_requires_complete_document_response,
     build_response_text,
     get_response_kind,
 )
@@ -53,11 +55,13 @@ class TaskOrchestrator:
         intent_agent: IntentAgent,
         context_agent: ContextAgent,
         answer_agent: AnswerAgent,
+        document_summary_agent: DocumentSummaryAgent,
     ) -> None:
         self._publisher = publisher
         self._intent_agent = intent_agent
         self._context_agent = context_agent
         self._answer_agent = answer_agent
+        self._document_summary_agent = document_summary_agent
 
     async def handle(self, message: IncomingMessage) -> None:
         try:
@@ -117,7 +121,10 @@ class TaskOrchestrator:
         await self._publish_think(user_id=message.user_id, data=INTENT_DETECTED_TEXT)
         await self._publish_prompt_status(message.user_id, LLMStatus.SEARCHING)
 
-        context_decision = self._context_agent.prepare(message.document_context)
+        context_decision = self._context_agent.prepare(
+            message.document_context,
+            mode=intent_decision.mode,
+        )
         logger.info(
             "Context prepared: user_id=%s retrieval_status=%s selected_chunks=%s "
             "total_chars=%s sources=%s",
@@ -133,7 +140,19 @@ class TaskOrchestrator:
         )
         await self._publish_prompt_status(message.user_id, LLMStatus.GENERATING)
 
-        if self._should_use_response_builder(
+        if self._should_use_summary_incomplete_fallback(
+            mode=intent_decision.mode,
+            retrieval_status=context_decision.status,
+        ):
+            response_text = build_summary_requires_complete_document_response()
+            logger.info(
+                "Complete document summary required: user_id=%s mode=%s "
+                "retrieval_status=%s",
+                message.user_id,
+                intent_decision.mode.value,
+                context_decision.status.value,
+            )
+        elif self._should_use_response_builder(
             mode=intent_decision.mode,
             retrieval_status=context_decision.status,
         ):
@@ -152,6 +171,19 @@ class TaskOrchestrator:
                 intent_decision.mode.value,
                 context_decision.status.value,
                 response_kind,
+            )
+        elif intent_decision.mode == AssistantMode.SUMMARIZE_DOCUMENT:
+            logger.info(
+                "Document summary selected: user_id=%s mode=%s "
+                "retrieval_status=%s selected_chunks=%s",
+                message.user_id,
+                intent_decision.mode.value,
+                context_decision.status.value,
+                len(context_decision.chunks),
+            )
+            response_text = await self._document_summary_agent.summarize(
+                user_prompt=message.prompt,
+                context_decision=context_decision,
             )
         else:
             logger.info(
@@ -227,6 +259,17 @@ class TaskOrchestrator:
         return (
             mode == AssistantMode.DOCUMENT_SEARCH
             or retrieval_status != RetrievalStatus.FOUND
+        )
+
+    @staticmethod
+    def _should_use_summary_incomplete_fallback(
+        *,
+        mode: AssistantMode,
+        retrieval_status: RetrievalStatus,
+    ) -> bool:
+        return (
+            mode == AssistantMode.SUMMARIZE_DOCUMENT
+            and retrieval_status == RetrievalStatus.INSUFFICIENT
         )
 
     async def _publish_response(self, user_id: UUID, data: str) -> None:
