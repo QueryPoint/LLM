@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from assistant_service.core.enums import AssistantMode
 from assistant_service.messaging.contracts import (
     incoming_message_adapter,
     outgoing_event_adapter,
@@ -18,6 +19,7 @@ def test_prompt_is_valid() -> None:
             "user_id": USER_ID,
             "prompt": "Explain database normalization",
             "doc": DOC_ID,
+            "mode": "explain_topic",
         }
     )
 
@@ -25,6 +27,7 @@ def test_prompt_is_valid() -> None:
     assert str(message.user_id) == USER_ID
     assert message.prompt == "Explain database normalization"
     assert str(message.doc) == DOC_ID
+    assert message.mode == AssistantMode.EXPLAIN_TOPIC
 
 
 def test_delete_is_valid() -> None:

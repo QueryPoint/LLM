@@ -11,6 +11,13 @@ class OutgoingEventType(str, Enum):
     RESPONSE = "response"
 
 
+class AssistantMode(str, Enum):
+    ANSWER_QUESTION = "answer_question"
+    DOCUMENT_SEARCH = "document_search"
+    SUMMARIZE_DOCUMENT = "summarize_document"
+    EXPLAIN_TOPIC = "explain_topic"
+
+
 class LLMStatus(str, Enum):
     QUEUED = "QUEUED"
     PROCESSING = "PROCESSING"
