@@ -81,7 +81,7 @@ class StreamingTextGenerator(Protocol):
     ) -> str:
         ...
 
-    async def stream_text(
+    def stream_text(
         self,
         *,
         system_instruction: str,
