@@ -18,6 +18,12 @@ class AssistantMode(str, Enum):
     EXPLAIN_TOPIC = "explain_topic"
 
 
+class RetrievalStatus(str, Enum):
+    FOUND = "found"
+    NOT_FOUND = "not_found"
+    INSUFFICIENT = "insufficient"
+
+
 class LLMStatus(str, Enum):
     QUEUED = "QUEUED"
     PROCESSING = "PROCESSING"

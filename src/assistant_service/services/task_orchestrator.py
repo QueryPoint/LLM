@@ -2,8 +2,9 @@ import logging
 from typing import Protocol
 from uuid import UUID
 
+from assistant_service.agents.context_agent import ContextAgent
 from assistant_service.agents.intent_agent import IntentAgent
-from assistant_service.core.enums import LLMStatus, OutgoingEventType
+from assistant_service.core.enums import LLMStatus, OutgoingEventType, RetrievalStatus
 from assistant_service.messaging.contracts import (
     DeleteRequestMessage,
     IncomingMessage,
@@ -20,9 +21,12 @@ STATUS_MESSAGES = {
     LLMStatus.PROCESSING: "Приняли запрос в обработку...",
     LLMStatus.THINKING: "Анализируем запрос...",
     LLMStatus.SEARCHING: "Ищем релевантные материалы...",
-    LLMStatus.FOUND: "Определили тип запроса...",
+    LLMStatus.FOUND: "Нашли подходящие материалы...",
     LLMStatus.GENERATING: "Готовим дальнейшую обработку...",
 }
+INTENT_DETECTED_TEXT = "Определили тип запроса..."
+CONTEXT_NOT_FOUND_TEXT = "Подходящие материалы не найдены."
+CONTEXT_INSUFFICIENT_TEXT = "Найденных материалов недостаточно для подготовки ответа."
 DELETE_THINK_TEXT = "История диалога очищена."
 TEMPORARY_ANSWER = (
     "Запрос принят. Ответ по материалам базы знаний будет сформирован после "
@@ -37,9 +41,15 @@ class EventPublisher(Protocol):
 
 
 class TaskOrchestrator:
-    def __init__(self, publisher: EventPublisher, intent_agent: IntentAgent) -> None:
+    def __init__(
+        self,
+        publisher: EventPublisher,
+        intent_agent: IntentAgent,
+        context_agent: ContextAgent,
+    ) -> None:
         self._publisher = publisher
         self._intent_agent = intent_agent
+        self._context_agent = context_agent
 
     async def handle(self, message: IncomingMessage) -> None:
         try:
@@ -96,7 +106,23 @@ class TaskOrchestrator:
             message.doc is not None,
         )
 
-        await self._publish_prompt_status(message.user_id, LLMStatus.FOUND)
+        await self._publish_think(user_id=message.user_id, data=INTENT_DETECTED_TEXT)
+        await self._publish_prompt_status(message.user_id, LLMStatus.SEARCHING)
+
+        context_decision = self._context_agent.prepare(message.document_context)
+        logger.info(
+            "Context prepared: user_id=%s retrieval_status=%s selected_chunks=%s "
+            "total_chars=%s sources=%s",
+            message.user_id,
+            context_decision.status.value,
+            len(context_decision.chunks),
+            context_decision.total_chars,
+            len(context_decision.sources),
+        )
+        await self._publish_context_status(
+            user_id=message.user_id,
+            retrieval_status=context_decision.status,
+        )
         await self._publish_prompt_status(message.user_id, LLMStatus.GENERATING)
         await self._publish_response(user_id=message.user_id, data=TEMPORARY_ANSWER)
 
@@ -132,6 +158,21 @@ class TaskOrchestrator:
             data=STATUS_MESSAGES[status],
             status=status,
         )
+
+    async def _publish_context_status(
+        self,
+        user_id: UUID,
+        retrieval_status: RetrievalStatus,
+    ) -> None:
+        if retrieval_status == RetrievalStatus.FOUND:
+            await self._publish_prompt_status(user_id, LLMStatus.FOUND)
+            return
+
+        if retrieval_status == RetrievalStatus.NOT_FOUND:
+            await self._publish_think(user_id=user_id, data=CONTEXT_NOT_FOUND_TEXT)
+            return
+
+        await self._publish_think(user_id=user_id, data=CONTEXT_INSUFFICIENT_TEXT)
 
     async def _publish_response(self, user_id: UUID, data: str) -> None:
         await self._publisher.publish_event(
