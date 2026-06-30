@@ -57,8 +57,7 @@ class RabbitMQPublisher:
         payload = outgoing_event_adapter.dump_python(event, mode="json")
         await self._publish_json(payload)
         logger.info(
-            "Outgoing event published: request_id=%s user_id=%s type=%s",
-            event.request_id,
+            "Outgoing event published: user_id=%s type=%s",
             event.user_id,
             event.type,
         )
@@ -164,8 +163,7 @@ class RabbitMQWorker:
             return
 
         logger.info(
-            "Incoming message accepted: request_id=%s user_id=%s type=%s",
-            request.request_id,
+            "Incoming message accepted: user_id=%s type=%s",
             request.user_id,
             request.type,
         )
@@ -174,8 +172,7 @@ class RabbitMQWorker:
             await self._process_request(request)
         except Exception:
             logger.exception(
-                "Unexpected handler error: request_id=%s user_id=%s",
-                request.request_id,
+                "Unexpected handler error: user_id=%s",
                 request.user_id,
             )
             await asyncio.sleep(self._settings.rabbitmq_requeue_delay_seconds)
