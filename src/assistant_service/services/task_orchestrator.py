@@ -13,6 +13,10 @@ from assistant_service.messaging.contracts import (
     ResponseEvent,
     ThinkEvent,
 )
+from assistant_service.services.response_builder import (
+    build_response_text,
+    get_response_kind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +32,6 @@ INTENT_DETECTED_TEXT = "Определили тип запроса..."
 CONTEXT_NOT_FOUND_TEXT = "Подходящие материалы не найдены."
 CONTEXT_INSUFFICIENT_TEXT = "Найденных материалов недостаточно для подготовки ответа."
 DELETE_THINK_TEXT = "История диалога очищена."
-TEMPORARY_ANSWER = (
-    "Запрос принят. Ответ по материалам базы знаний будет сформирован после "
-    "подключения модулей анализа контекста."
-)
 SAFE_ERROR_RESPONSE = "Не удалось обработать запрос. Попробуйте ещё раз."
 
 
@@ -124,7 +124,24 @@ class TaskOrchestrator:
             retrieval_status=context_decision.status,
         )
         await self._publish_prompt_status(message.user_id, LLMStatus.GENERATING)
-        await self._publish_response(user_id=message.user_id, data=TEMPORARY_ANSWER)
+
+        response_text = build_response_text(
+            mode=intent_decision.mode,
+            context_decision=context_decision,
+        )
+        response_kind = get_response_kind(
+            mode=intent_decision.mode,
+            context_decision=context_decision,
+        )
+        logger.info(
+            "Response selected without LLM: user_id=%s mode=%s "
+            "retrieval_status=%s response_kind=%s",
+            message.user_id,
+            intent_decision.mode.value,
+            context_decision.status.value,
+            response_kind,
+        )
+        await self._publish_response(user_id=message.user_id, data=response_text)
 
     async def _handle_delete(self, message: DeleteRequestMessage) -> None:
         logger.info(
