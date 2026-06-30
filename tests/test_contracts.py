@@ -215,3 +215,9 @@ def test_assistant_mode_validates_from_json_value() -> None:
     )
 
     assert message.mode is AssistantMode.EXPLAIN_TOPIC
+
+
+def test_main_module_imports_without_http_app() -> None:
+    import assistant_service.main
+
+    assert assistant_service.main.__name__ == "assistant_service.main"

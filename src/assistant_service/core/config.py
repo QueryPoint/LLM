@@ -12,10 +12,7 @@ class Settings(BaseSettings):
 
     app_name: str = "assistant-service"
     app_env: str = "development"
-    app_host: str = "0.0.0.0"
-    app_port: int = 8001
     log_level: str = "INFO"
-    internal_service_token: str = "change-me"
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     rabbitmq_back_to_llm_queue: str = "back_to_llm"
     rabbitmq_llm_to_back_queue: str = "llm_to_back"

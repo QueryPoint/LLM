@@ -8,7 +8,6 @@ class IncomingMessageType(str, Enum):
 
 class OutgoingEventType(str, Enum):
     THINK = "think"
-    TOKEN = "token"
     DONE = "done"
     ERROR = "error"
 
@@ -35,7 +34,6 @@ class ThinkStage(str, Enum):
     PREPARING_CONTEXT = "PREPARING_CONTEXT"
     CONTEXT_READY = "CONTEXT_READY"
     GENERATING = "GENERATING"
-    STREAMING = "STREAMING"
     FINALIZING = "FINALIZING"
     NO_CONTEXT = "NO_CONTEXT"
     CLEARING_SESSION = "CLEARING_SESSION"
