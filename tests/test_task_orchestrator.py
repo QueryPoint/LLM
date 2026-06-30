@@ -83,12 +83,16 @@ class FakeContextAgent:
         status: RetrievalStatus = RetrievalStatus.FOUND,
         chunks: tuple[RetrievedChunk, ...] = (),
     ) -> None:
-        self.calls: list[object] = []
+        self.calls: list[tuple[object, AssistantMode | None]] = []
         self._status = status
         self._chunks = chunks
 
-    def prepare(self, document_context: object) -> ContextDecision:
-        self.calls.append(document_context)
+    def prepare(
+        self,
+        document_context: object,
+        mode: AssistantMode | None = None,
+    ) -> ContextDecision:
+        self.calls.append((document_context, mode))
         return ContextDecision(
             status=self._status,
             chunks=self._chunks,
@@ -110,6 +114,20 @@ class FakeAnswerAgent:
     ) -> str:
         self.calls.append((mode, user_prompt, context_decision))
         return "Generated answer"
+
+
+class FakeDocumentSummaryAgent:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str | None, ContextDecision]] = []
+
+    async def summarize(
+        self,
+        *,
+        user_prompt: str | None,
+        context_decision: ContextDecision,
+    ) -> str:
+        self.calls.append((user_prompt, context_decision))
+        return "Document summary"
 
 
 def _chunk() -> RetrievedChunk:
@@ -162,11 +180,13 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
     intent_agent = FakeIntentAgent(mode=AssistantMode.DOCUMENT_SEARCH)
     context_agent = FakeContextAgent(chunks=(_chunk(),))
     answer_agent = FakeAnswerAgent()
+    document_summary_agent = FakeDocumentSummaryAgent()
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
         context_agent=context_agent,
         answer_agent=answer_agent,
+        document_summary_agent=document_summary_agent,
     )
 
     message = _prompt_message()
@@ -202,8 +222,11 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
             AssistantMode.SUMMARIZE_DOCUMENT,
         )
     ]
-    assert context_agent.calls == [message.document_context]
+    assert context_agent.calls == [
+        (message.document_context, AssistantMode.DOCUMENT_SEARCH)
+    ]
     assert answer_agent.calls == []
+    assert document_summary_agent.calls == []
 
 
 def test_answer_question_found_context_publishes_single_buffered_response() -> None:
@@ -211,11 +234,13 @@ def test_answer_question_found_context_publishes_single_buffered_response() -> N
     intent_agent = FakeIntentAgent(mode=AssistantMode.ANSWER_QUESTION)
     context_agent = FakeContextAgent(chunks=(_chunk(),))
     answer_agent = FakeAnswerAgent()
+    document_summary_agent = FakeDocumentSummaryAgent()
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
         context_agent=context_agent,
         answer_agent=answer_agent,
+        document_summary_agent=document_summary_agent,
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -237,6 +262,33 @@ def test_answer_question_found_context_publishes_single_buffered_response() -> N
     ]
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert {event.type.value for event in publisher.events} == {"think", "response"}
+    assert document_summary_agent.calls == []
+
+
+def test_summarize_document_found_context_uses_document_summary_agent() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(mode=AssistantMode.SUMMARIZE_DOCUMENT)
+    context_agent = FakeContextAgent(chunks=(_chunk(),))
+    answer_agent = FakeAnswerAgent()
+    document_summary_agent = FakeDocumentSummaryAgent()
+    orchestrator = TaskOrchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        context_agent=context_agent,
+        answer_agent=answer_agent,
+        document_summary_agent=document_summary_agent,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message()))
+
+    assert answer_agent.calls == []
+    assert len(document_summary_agent.calls) == 1
+    response_events = [
+        event for event in publisher.events if event.type == OutgoingEventType.RESPONSE
+    ]
+    assert len(response_events) == 1
+    assert response_events[0].data == "Document summary"
+    assert {event.type.value for event in publisher.events} == {"think", "response"}
 
 
 def test_delete_publishes_only_think_confirmation() -> None:
@@ -244,11 +296,13 @@ def test_delete_publishes_only_think_confirmation() -> None:
     intent_agent = FakeIntentAgent()
     context_agent = FakeContextAgent()
     answer_agent = FakeAnswerAgent()
+    document_summary_agent = FakeDocumentSummaryAgent()
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
         context_agent=context_agent,
         answer_agent=answer_agent,
+        document_summary_agent=document_summary_agent,
     )
 
     asyncio.run(orchestrator.handle(_delete_message()))
@@ -259,6 +313,7 @@ def test_delete_publishes_only_think_confirmation() -> None:
     assert intent_agent.calls == []
     assert context_agent.calls == []
     assert answer_agent.calls == []
+    assert document_summary_agent.calls == []
 
 
 def test_handled_processing_error_publishes_safe_response() -> None:
@@ -268,6 +323,7 @@ def test_handled_processing_error_publishes_safe_response() -> None:
         intent_agent=FakeIntentAgent(fail=True),
         context_agent=FakeContextAgent(),
         answer_agent=FakeAnswerAgent(),
+        document_summary_agent=FakeDocumentSummaryAgent(),
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -283,6 +339,7 @@ def test_safe_response_publish_failure_is_reraised() -> None:
         intent_agent=FakeIntentAgent(fail=True),
         context_agent=FakeContextAgent(),
         answer_agent=FakeAnswerAgent(),
+        document_summary_agent=FakeDocumentSummaryAgent(),
     )
 
     with pytest.raises(RuntimeError):
