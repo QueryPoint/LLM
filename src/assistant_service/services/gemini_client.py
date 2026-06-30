@@ -99,7 +99,7 @@ class GeminiClient:
             )
 
             async for chunk in stream:
-                text = self._extract_optional_text(chunk)
+                text = self._extract_optional_stream_text(chunk)
                 if text is None:
                     continue
 
@@ -167,6 +167,17 @@ class GeminiClient:
 
         stripped_text = text.strip()
         return stripped_text or None
+
+    @staticmethod
+    def _extract_optional_stream_text(response: object) -> str | None:
+        text = getattr(response, "text", None)
+        if not isinstance(text, str):
+            return None
+
+        if text.strip() == "":
+            return None
+
+        return text
 
     def _log_generation_exception(self, operation: str, exc: Exception) -> None:
         logger.exception(

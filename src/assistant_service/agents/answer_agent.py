@@ -1,9 +1,11 @@
 import logging
+from collections.abc import AsyncIterator
 from typing import Protocol
 
 from assistant_service.agents.context_agent import ContextDecision
 from assistant_service.core.enums import AssistantMode, RetrievalStatus
 from assistant_service.messaging.contracts import RetrievedChunk
+from assistant_service.services.gemini_client import GeminiClientError
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,6 @@ BASE_SYSTEM_INSTRUCTION = """
 - Gemini;
 - LLM;
 - внутренние агенты;
-- RabbitMQ;
 - backend;
 - system prompt;
 - контекстное окно;
@@ -69,7 +70,7 @@ MODE_INSTRUCTIONS = {
 }
 
 
-class TextGenerator(Protocol):
+class StreamingTextGenerator(Protocol):
     async def generate_text(
         self,
         *,
@@ -80,9 +81,19 @@ class TextGenerator(Protocol):
     ) -> str:
         ...
 
+    def stream_text(
+        self,
+        *,
+        system_instruction: str,
+        prompt: str,
+        max_output_tokens: int = 1024,
+        temperature: float = 0.2,
+    ) -> AsyncIterator[str]:
+        ...
+
 
 class AnswerAgent:
-    def __init__(self, text_generator: TextGenerator) -> None:
+    def __init__(self, text_generator: StreamingTextGenerator) -> None:
         self._text_generator = text_generator
 
     async def answer(
@@ -100,22 +111,32 @@ class AnswerAgent:
         )
 
         logger.info(
-            "Answer generation started: mode=%s selected_chunks=%s",
+            "Answer streaming started: mode=%s selected_chunks=%s",
             mode.value,
             len(context_decision.chunks),
         )
-        answer = await self._text_generator.generate_text(
+        fragments: list[str] = []
+        async for fragment in self._text_generator.stream_text(
             system_instruction=system_instruction,
             prompt=gemini_prompt,
             max_output_tokens=MAX_OUTPUT_TOKENS_BY_MODE[mode],
             temperature=GENERATION_TEMPERATURE,
-        )
+        ):
+            fragments.append(fragment)
+
+        answer = "".join(fragments).strip()
+        if answer == "":
+            raise GeminiClientError("Gemini streaming response did not contain text.")
+
         logger.info(
-            "Answer generation completed: mode=%s selected_chunks=%s",
+            "Answer streaming finalized: mode=%s selected_chunks=%s fragments=%s "
+            "answer_chars=%s",
             mode.value,
             len(context_decision.chunks),
+            len(fragments),
+            len(answer),
         )
-        return answer.strip()
+        return answer
 
     @staticmethod
     def _validate_generation_path(

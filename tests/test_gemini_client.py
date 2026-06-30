@@ -11,37 +11,42 @@ class FakeResponse:
 
 
 class FakeModels:
+    def __init__(self, stream_fragments: tuple[str | None, ...]) -> None:
+        self._stream_fragments = stream_fragments
+
     async def generate_content(self, **kwargs: object) -> FakeResponse:
         return FakeResponse("  Generated answer.  ")
 
     async def generate_content_stream(self, **kwargs: object) -> object:
         async def stream() -> object:
-            for text in ("", "  first  ", "   ", "second"):
+            for text in self._stream_fragments:
                 yield FakeResponse(text)
 
         return stream()
 
 
 class FakeAioClient:
-    def __init__(self) -> None:
-        self.models = FakeModels()
+    def __init__(self, stream_fragments: tuple[str | None, ...]) -> None:
+        self.models = FakeModels(stream_fragments)
 
     async def aclose(self) -> None:
         return None
 
 
 class FakeSdkClient:
-    def __init__(self) -> None:
-        self.aio = FakeAioClient()
+    def __init__(self, stream_fragments: tuple[str | None, ...]) -> None:
+        self.aio = FakeAioClient(stream_fragments)
 
 
-def _client() -> GeminiClient:
+def _client(
+    stream_fragments: tuple[str | None, ...] = ("", "  first  ", "   ", "second"),
+) -> GeminiClient:
     client = GeminiClient(
         api_key="placeholder",
         model="gemini-2.5-flash",
         timeout_seconds=60,
     )
-    client._client = FakeSdkClient()
+    client._client = FakeSdkClient(stream_fragments)
     return client
 
 
@@ -102,4 +107,19 @@ def test_stream_text_skips_empty_chunks_and_yields_non_empty_fragments() -> None
             )
         ]
 
-    assert asyncio.run(collect()) == ["first", "second"]
+    assert asyncio.run(collect()) == ["  first  ", "second"]
+
+
+def test_stream_text_preserves_fragment_boundaries() -> None:
+    async def collect() -> list[str]:
+        return [
+            fragment
+            async for fragment in _client(
+                stream_fragments=("Привет ", "мир", "!", "   ")
+            ).stream_text(
+                system_instruction="System",
+                prompt="Prompt",
+            )
+        ]
+
+    assert asyncio.run(collect()) == ["Привет ", "мир", "!"]

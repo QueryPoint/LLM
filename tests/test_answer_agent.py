@@ -17,6 +17,7 @@ from assistant_service.messaging.contracts import (
     RetrievedChunk,
     incoming_message_adapter,
 )
+from assistant_service.services.gemini_client import GeminiClientError
 from assistant_service.services.task_orchestrator import TaskOrchestrator
 
 
@@ -26,9 +27,13 @@ CHUNK_ID = "00000000-0000-0000-0000-000000000004"
 
 
 class FakeTextGenerator:
-    def __init__(self, response: str = "  Ответ на основе контекста.  ") -> None:
-        self.calls: list[dict[str, object]] = []
-        self._response = response
+    def __init__(
+        self,
+        stream_fragments: tuple[str, ...] = ("Ответ ", "на основе контекста."),
+    ) -> None:
+        self.generate_text_calls: list[dict[str, object]] = []
+        self.stream_text_calls: list[dict[str, object]] = []
+        self._stream_fragments = stream_fragments
 
     async def generate_text(
         self,
@@ -38,7 +43,7 @@ class FakeTextGenerator:
         max_output_tokens: int = 1024,
         temperature: float = 0.2,
     ) -> str:
-        self.calls.append(
+        self.generate_text_calls.append(
             {
                 "system_instruction": system_instruction,
                 "prompt": prompt,
@@ -46,7 +51,26 @@ class FakeTextGenerator:
                 "temperature": temperature,
             }
         )
-        return self._response
+        return "generate_text must not be used"
+
+    async def stream_text(
+        self,
+        *,
+        system_instruction: str,
+        prompt: str,
+        max_output_tokens: int = 1024,
+        temperature: float = 0.2,
+    ) -> object:
+        self.stream_text_calls.append(
+            {
+                "system_instruction": system_instruction,
+                "prompt": prompt,
+                "max_output_tokens": max_output_tokens,
+                "temperature": temperature,
+            }
+        )
+        for fragment in self._stream_fragments:
+            yield fragment
 
 
 class FakePublisher:
@@ -127,7 +151,9 @@ def _prompt_message() -> IncomingMessage:
 
 
 def test_answer_question_uses_grounded_prompt_without_internal_identifiers() -> None:
-    generator = FakeTextGenerator()
+    generator = FakeTextGenerator(
+        stream_fragments=("Ответ ", "сформирован", " корректно.")
+    )
     agent = AnswerAgent(text_generator=generator)
 
     answer = asyncio.run(
@@ -138,9 +164,10 @@ def test_answer_question_uses_grounded_prompt_without_internal_identifiers() -> 
         )
     )
 
-    assert answer == "Ответ на основе контекста."
-    assert len(generator.calls) == 1
-    call = generator.calls[0]
+    assert answer == "Ответ сформирован корректно."
+    assert generator.generate_text_calls == []
+    assert len(generator.stream_text_calls) == 1
+    call = generator.stream_text_calls[0]
     assert "Отвечай только на основе материалов" in str(call["system_instruction"])
     assert "Ответь прямо на вопрос пользователя." in str(call["system_instruction"])
     prompt = str(call["prompt"])
@@ -170,7 +197,7 @@ def test_explain_topic_uses_educational_instruction() -> None:
     )
 
     assert "Объясни тему простым учебным языком." in str(
-        generator.calls[0]["system_instruction"]
+        generator.stream_text_calls[0]["system_instruction"]
     )
 
 
@@ -187,12 +214,26 @@ def test_summarize_document_uses_summary_instruction_and_token_limit() -> None:
     )
 
     assert "Сделай краткое структурированное изложение" in str(
-        generator.calls[0]["system_instruction"]
+        generator.stream_text_calls[0]["system_instruction"]
     )
-    assert generator.calls[0]["max_output_tokens"] == 1200
+    assert generator.stream_text_calls[0]["max_output_tokens"] == 1200
     assert "Сформируй ответ по переданным материалам." in str(
-        generator.calls[0]["prompt"]
+        generator.stream_text_calls[0]["prompt"]
     )
+
+
+def test_empty_buffered_stream_raises_client_error() -> None:
+    generator = FakeTextGenerator(stream_fragments=("", "   "))
+    agent = AnswerAgent(text_generator=generator)
+
+    with pytest.raises(GeminiClientError):
+        asyncio.run(
+            agent.answer(
+                mode=AssistantMode.ANSWER_QUESTION,
+                user_prompt="Prompt",
+                context_decision=_context_decision(),
+            )
+        )
 
 
 def test_invalid_generation_paths_raise_without_calling_generator() -> None:
@@ -223,7 +264,8 @@ def test_invalid_generation_paths_raise_without_calling_generator() -> None:
                 )
             )
 
-    assert generator.calls == []
+    assert generator.generate_text_calls == []
+    assert generator.stream_text_calls == []
 
 
 def test_orchestrator_uses_answer_agent_for_answer_question_with_found_context() -> None:

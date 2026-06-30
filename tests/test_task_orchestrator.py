@@ -206,6 +206,39 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
     assert answer_agent.calls == []
 
 
+def test_answer_question_found_context_publishes_single_buffered_response() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(mode=AssistantMode.ANSWER_QUESTION)
+    context_agent = FakeContextAgent(chunks=(_chunk(),))
+    answer_agent = FakeAnswerAgent()
+    orchestrator = TaskOrchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        context_agent=context_agent,
+        answer_agent=answer_agent,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message()))
+
+    assert len(answer_agent.calls) == 1
+    assert answer_agent.calls[0][0] == AssistantMode.ANSWER_QUESTION
+    response_events = [
+        event for event in publisher.events if event.type == OutgoingEventType.RESPONSE
+    ]
+    assert len(response_events) == 1
+    assert response_events[0].data == "Generated answer"
+    assert [event.type for event in publisher.events[:-1]] == [
+        OutgoingEventType.THINK,
+        OutgoingEventType.THINK,
+        OutgoingEventType.THINK,
+        OutgoingEventType.THINK,
+        OutgoingEventType.THINK,
+        OutgoingEventType.THINK,
+    ]
+    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
+    assert {event.type.value for event in publisher.events} == {"think", "response"}
+
+
 def test_delete_publishes_only_think_confirmation() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent()
