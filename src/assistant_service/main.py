@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 from assistant_service.agents.answer_agent import AnswerAgent
 from assistant_service.agents.context_agent import ContextAgent
+from assistant_service.agents.document_summary_agent import DocumentSummaryAgent
 from assistant_service.agents.intent_agent import IntentAgent
 from assistant_service.core.config import settings
 from assistant_service.messaging.rabbitmq import RabbitMQWorker
@@ -43,11 +44,13 @@ async def run_worker() -> None:
     try:
         gemini_client = create_gemini_client_from_settings(settings)
         answer_agent = AnswerAgent(text_generator=gemini_client)
+        document_summary_agent = DocumentSummaryAgent(text_generator=gemini_client)
         orchestrator = TaskOrchestrator(
             publisher=worker,
             intent_agent=intent_agent,
             context_agent=context_agent,
             answer_agent=answer_agent,
+            document_summary_agent=document_summary_agent,
         )
         worker.set_message_handler(orchestrator.handle)
 
