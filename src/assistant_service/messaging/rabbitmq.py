@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aio_pika
@@ -22,6 +23,8 @@ from assistant_service.messaging.contracts import (
 )
 
 logger = logging.getLogger(__name__)
+
+MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
 
 
 class RabbitMQPublisher:
@@ -62,8 +65,9 @@ class RabbitMQPublisher:
 
 
 class RabbitMQWorker:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, message_handler: MessageHandler) -> None:
         self._settings = settings
+        self._message_handler = message_handler
         self._connection: AbstractRobustConnection | None = None
         self._channel: AbstractRobustChannel | None = None
         self._queue: AbstractRobustQueue | None = None
@@ -165,9 +169,4 @@ class RabbitMQWorker:
         await message.ack()
 
     async def _process_request(self, request: IncomingMessage) -> None:
-        logger.info(
-            "LLM request handled by stub: request_id=%s user_id=%s type=%s",
-            request.request_id,
-            request.user_id,
-            request.type,
-        )
+        await self._message_handler(request)
