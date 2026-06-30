@@ -4,6 +4,7 @@ import logging
 import signal
 from collections.abc import Sequence
 
+from assistant_service.agents.intent_agent import IntentAgent
 from assistant_service.core.config import settings
 from assistant_service.messaging.rabbitmq import RabbitMQWorker
 from assistant_service.services.task_orchestrator import TaskOrchestrator
@@ -30,7 +31,8 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
 
 async def run_worker() -> None:
     worker = RabbitMQWorker(settings=settings)
-    orchestrator = TaskOrchestrator(publisher=worker)
+    intent_agent = IntentAgent()
+    orchestrator = TaskOrchestrator(publisher=worker, intent_agent=intent_agent)
     worker.set_message_handler(orchestrator.handle)
 
     stop_event = asyncio.Event()

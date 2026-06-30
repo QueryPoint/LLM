@@ -3,7 +3,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from assistant_service.core.enums import IncomingMessageType, OutgoingEventType
+from assistant_service.core.enums import (
+    AssistantMode,
+    IncomingMessageType,
+    OutgoingEventType,
+)
 
 
 class StrictBaseModel(BaseModel):
@@ -15,6 +19,7 @@ class PromptRequestMessage(StrictBaseModel):
     user_id: UUID
     prompt: str | None = None
     doc: UUID | None = None
+    mode: AssistantMode | None = None
 
 
 class DeleteRequestMessage(StrictBaseModel):

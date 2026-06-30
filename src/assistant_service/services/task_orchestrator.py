@@ -2,6 +2,7 @@ import logging
 from typing import Protocol
 from uuid import UUID
 
+from assistant_service.agents.intent_agent import IntentAgent
 from assistant_service.core.enums import LLMStatus, OutgoingEventType
 from assistant_service.messaging.contracts import (
     DeleteRequestMessage,
@@ -19,15 +20,9 @@ STATUS_MESSAGES = {
     LLMStatus.PROCESSING: "Приняли запрос в обработку...",
     LLMStatus.THINKING: "Анализируем запрос...",
     LLMStatus.SEARCHING: "Ищем релевантные материалы...",
-    LLMStatus.FOUND: "Нашли подходящие материалы...",
-    LLMStatus.GENERATING: "Формируем ответ...",
+    LLMStatus.FOUND: "Определили тип запроса...",
+    LLMStatus.GENERATING: "Готовим дальнейшую обработку...",
 }
-PROMPT_STATUSES = (
-    LLMStatus.PROCESSING,
-    LLMStatus.THINKING,
-    LLMStatus.SEARCHING,
-    LLMStatus.GENERATING,
-)
 DELETE_THINK_TEXT = "История диалога очищена."
 TEMPORARY_ANSWER = (
     "Запрос принят. Ответ по материалам базы знаний будет сформирован после "
@@ -42,8 +37,9 @@ class EventPublisher(Protocol):
 
 
 class TaskOrchestrator:
-    def __init__(self, publisher: EventPublisher) -> None:
+    def __init__(self, publisher: EventPublisher, intent_agent: IntentAgent) -> None:
         self._publisher = publisher
+        self._intent_agent = intent_agent
 
     async def handle(self, message: IncomingMessage) -> None:
         try:
@@ -55,7 +51,7 @@ class TaskOrchestrator:
                 await self._handle_delete(message)
                 return
 
-        except Exception as exc:
+        except Exception:
             logger.exception(
                 "Task orchestrator processing failed: user_id=%s message_type=%s",
                 message.user_id,
@@ -83,12 +79,25 @@ class TaskOrchestrator:
             "Task orchestrator received prompt: user_id=%s",
             message.user_id,
         )
-        for status in PROMPT_STATUSES:
-            await self._publish_think(
-                user_id=message.user_id,
-                data=STATUS_MESSAGES[status],
-                status=status,
-            )
+        await self._publish_prompt_status(message.user_id, LLMStatus.PROCESSING)
+        await self._publish_prompt_status(message.user_id, LLMStatus.THINKING)
+
+        intent_decision = self._intent_agent.detect(
+            prompt=message.prompt,
+            document_id=message.doc,
+            requested_mode=message.mode,
+        )
+        logger.info(
+            "Intent detected: user_id=%s selected_mode=%s "
+            "selection_source=%s has_document=%s",
+            message.user_id,
+            intent_decision.mode.value,
+            intent_decision.source,
+            message.doc is not None,
+        )
+
+        await self._publish_prompt_status(message.user_id, LLMStatus.FOUND)
+        await self._publish_prompt_status(message.user_id, LLMStatus.GENERATING)
         await self._publish_response(user_id=message.user_id, data=TEMPORARY_ANSWER)
 
     async def _handle_delete(self, message: DeleteRequestMessage) -> None:
@@ -115,6 +124,13 @@ class TaskOrchestrator:
             "Task orchestrator published think event: user_id=%s status=%s",
             user_id,
             status.value if status is not None else None,
+        )
+
+    async def _publish_prompt_status(self, user_id: UUID, status: LLMStatus) -> None:
+        await self._publish_think(
+            user_id=user_id,
+            data=STATUS_MESSAGES[status],
+            status=status,
         )
 
     async def _publish_response(self, user_id: UUID, data: str) -> None:
