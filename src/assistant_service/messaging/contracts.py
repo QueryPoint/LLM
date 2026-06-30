@@ -77,14 +77,6 @@ class ThinkEvent(StrictBaseModel):
     warning: int = Field(default=0, ge=0, le=100)
 
 
-class TokenEvent(StrictBaseModel):
-    request_id: UUID
-    user_id: UUID
-    type: Literal[OutgoingEventType.TOKEN]
-    data: str
-    warning: int = Field(default=0, ge=0, le=100)
-
-
 class DoneEvent(StrictBaseModel):
     request_id: UUID
     user_id: UUID
@@ -102,7 +94,7 @@ class ErrorEvent(StrictBaseModel):
 
 
 OutgoingEvent = Annotated[
-    ThinkEvent | TokenEvent | DoneEvent | ErrorEvent,
+    ThinkEvent | DoneEvent | ErrorEvent,
     Field(discriminator="type"),
 ]
 
