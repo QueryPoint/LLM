@@ -33,6 +33,7 @@ class RetrievedChunk(StrictBaseModel):
 
 class DocumentContext(StrictBaseModel):
     retrieval_status: RetrievalStatus
+    is_complete_document: bool = False
     chunks: list[RetrievedChunk] = Field(default_factory=list)
 
 
