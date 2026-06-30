@@ -43,7 +43,6 @@ BASE_SYSTEM_INSTRUCTION = """
 - Gemini;
 - LLM;
 - внутренние агенты;
-- RabbitMQ;
 - backend;
 - system prompt;
 - контекстное окно;
