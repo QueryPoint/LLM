@@ -65,7 +65,11 @@ class RabbitMQPublisher:
 
 
 class RabbitMQWorker:
-    def __init__(self, settings: Settings, message_handler: MessageHandler) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        message_handler: MessageHandler | None = None,
+    ) -> None:
         self._settings = settings
         self._message_handler = message_handler
         self._connection: AbstractRobustConnection | None = None
@@ -73,6 +77,15 @@ class RabbitMQWorker:
         self._queue: AbstractRobustQueue | None = None
         self._consumer_tag: str | None = None
         self.publisher: RabbitMQPublisher | None = None
+
+    def set_message_handler(self, message_handler: MessageHandler) -> None:
+        self._message_handler = message_handler
+
+    async def publish_event(self, event: OutgoingEvent) -> None:
+        if self.publisher is None:
+            raise RuntimeError("RabbitMQ publisher is not ready")
+
+        await self.publisher.publish_event(event)
 
     @property
     def is_ready(self) -> bool:
@@ -85,6 +98,9 @@ class RabbitMQWorker:
         )
 
     async def start(self) -> None:
+        if self._message_handler is None:
+            raise RuntimeError("RabbitMQ message handler is not configured")
+
         logger.info("RabbitMQ connection started")
         try:
             self._connection = await aio_pika.connect_robust(
@@ -169,4 +185,7 @@ class RabbitMQWorker:
         await message.ack()
 
     async def _process_request(self, request: IncomingMessage) -> None:
+        if self._message_handler is None:
+            raise RuntimeError("RabbitMQ message handler is not configured")
+
         await self._message_handler(request)

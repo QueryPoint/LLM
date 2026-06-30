@@ -5,8 +5,8 @@ import signal
 from collections.abc import Sequence
 
 from assistant_service.core.config import settings
-from assistant_service.messaging.contracts import IncomingMessage
 from assistant_service.messaging.rabbitmq import RabbitMQWorker
+from assistant_service.services.task_orchestrator import TaskOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -15,15 +15,6 @@ def build_parser() -> argparse.ArgumentParser:
     return argparse.ArgumentParser(
         prog="assistant-service",
         description="Run the assistant-service RabbitMQ worker.",
-    )
-
-
-async def handle_message(message: IncomingMessage) -> None:
-    logger.info(
-        "Valid RabbitMQ message received: request_id=%s user_id=%s type=%s",
-        message.request_id,
-        message.user_id,
-        message.type,
     )
 
 
@@ -38,7 +29,10 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
 
 
 async def run_worker() -> None:
-    worker = RabbitMQWorker(settings=settings, message_handler=handle_message)
+    worker = RabbitMQWorker(settings=settings)
+    orchestrator = TaskOrchestrator(publisher=worker)
+    worker.set_message_handler(orchestrator.handle)
+
     stop_event = asyncio.Event()
     _install_signal_handlers(stop_event)
 

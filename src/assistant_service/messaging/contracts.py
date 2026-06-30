@@ -90,6 +90,7 @@ class ErrorEvent(StrictBaseModel):
     user_id: UUID
     type: Literal[OutgoingEventType.ERROR]
     data: str
+    error_code: str
     warning: int = Field(default=0, ge=0, le=100)
 
 
