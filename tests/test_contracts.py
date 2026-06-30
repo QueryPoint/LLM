@@ -39,17 +39,17 @@ def test_delete_is_valid() -> None:
     assert str(message.user_id) == USER_ID
 
 
-def test_sync_is_valid() -> None:
+def test_think_is_valid() -> None:
     event = outgoing_event_adapter.validate_python(
         {
-            "type": "sync",
+            "type": "think",
             "user_id": USER_ID,
-            "data": "Обрабатываем запрос...",
+            "data": "Ищем релевантные материалы...",
         }
     )
 
-    assert event.type == "sync"
-    assert event.data == "Обрабатываем запрос..."
+    assert event.type == "think"
+    assert event.data == "Ищем релевантные материалы..."
 
 
 def test_response_is_valid() -> None:

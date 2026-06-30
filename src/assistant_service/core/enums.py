@@ -7,5 +7,14 @@ class IncomingMessageType(str, Enum):
 
 
 class OutgoingEventType(str, Enum):
-    SYNC = "sync"
+    THINK = "think"
     RESPONSE = "response"
+
+
+class LLMStatus(str, Enum):
+    QUEUED = "QUEUED"
+    PROCESSING = "PROCESSING"
+    THINKING = "THINKING"
+    SEARCHING = "SEARCHING"
+    FOUND = "FOUND"
+    GENERATING = "GENERATING"

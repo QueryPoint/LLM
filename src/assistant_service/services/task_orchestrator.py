@@ -2,20 +2,33 @@ import logging
 from typing import Protocol
 from uuid import UUID
 
-from assistant_service.core.enums import OutgoingEventType
+from assistant_service.core.enums import LLMStatus, OutgoingEventType
 from assistant_service.messaging.contracts import (
     DeleteRequestMessage,
     IncomingMessage,
     OutgoingEvent,
     PromptRequestMessage,
     ResponseEvent,
-    SyncEvent,
+    ThinkEvent,
 )
 
 logger = logging.getLogger(__name__)
 
-PROMPT_SYNC_TEXT = "Обрабатываем запрос..."
-DELETE_SYNC_TEXT = "История диалога очищена."
+STATUS_MESSAGES = {
+    LLMStatus.QUEUED: "Запрос добавлен в очередь...",
+    LLMStatus.PROCESSING: "Приняли запрос в обработку...",
+    LLMStatus.THINKING: "Анализируем запрос...",
+    LLMStatus.SEARCHING: "Ищем релевантные материалы...",
+    LLMStatus.FOUND: "Нашли подходящие материалы...",
+    LLMStatus.GENERATING: "Формируем ответ...",
+}
+PROMPT_STATUSES = (
+    LLMStatus.PROCESSING,
+    LLMStatus.THINKING,
+    LLMStatus.SEARCHING,
+    LLMStatus.GENERATING,
+)
+DELETE_THINK_TEXT = "История диалога очищена."
 TEMPORARY_ANSWER = (
     "Запрос принят. Ответ по материалам базы знаний будет сформирован после "
     "подключения модулей анализа контекста."
@@ -70,7 +83,12 @@ class TaskOrchestrator:
             "Task orchestrator received prompt: user_id=%s",
             message.user_id,
         )
-        await self._publish_sync(user_id=message.user_id, data=PROMPT_SYNC_TEXT)
+        for status in PROMPT_STATUSES:
+            await self._publish_think(
+                user_id=message.user_id,
+                data=STATUS_MESSAGES[status],
+                status=status,
+            )
         await self._publish_response(user_id=message.user_id, data=TEMPORARY_ANSWER)
 
     async def _handle_delete(self, message: DeleteRequestMessage) -> None:
@@ -78,15 +96,25 @@ class TaskOrchestrator:
             "Task orchestrator received delete: user_id=%s",
             message.user_id,
         )
-        await self._publish_sync(user_id=message.user_id, data=DELETE_SYNC_TEXT)
+        await self._publish_think(user_id=message.user_id, data=DELETE_THINK_TEXT)
 
-    async def _publish_sync(self, user_id: UUID, data: str) -> None:
+    async def _publish_think(
+        self,
+        user_id: UUID,
+        data: str,
+        status: LLMStatus | None = None,
+    ) -> None:
         await self._publisher.publish_event(
-            SyncEvent(
-                type=OutgoingEventType.SYNC,
+            ThinkEvent(
+                type=OutgoingEventType.THINK,
                 user_id=user_id,
                 data=data,
             )
+        )
+        logger.info(
+            "Task orchestrator published think event: user_id=%s status=%s",
+            user_id,
+            status.value if status is not None else None,
         )
 
     async def _publish_response(self, user_id: UUID, data: str) -> None:

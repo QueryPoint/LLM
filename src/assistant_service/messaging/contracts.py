@@ -28,21 +28,21 @@ IncomingMessage = Annotated[
 ]
 
 
-class SyncEvent(StrictBaseModel):
-    type: Literal[OutgoingEventType.SYNC]
+class ThinkEvent(StrictBaseModel):
+    type: Literal[OutgoingEventType.THINK]
     user_id: UUID
-    data: str
+    data: str = Field(min_length=1)
 
 
 class ResponseEvent(StrictBaseModel):
     type: Literal[OutgoingEventType.RESPONSE]
     user_id: UUID
-    data: str
+    data: str = Field(min_length=1)
     warning: int = Field(default=0, ge=0, le=100)
 
 
 OutgoingEvent = Annotated[
-    SyncEvent | ResponseEvent,
+    ThinkEvent | ResponseEvent,
     Field(discriminator="type"),
 ]
 
