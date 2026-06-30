@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from assistant_service.agents.context_agent import ContextAgent
-from assistant_service.core.enums import RetrievalStatus
+from assistant_service.core.enums import AssistantMode, RetrievalStatus
 from assistant_service.messaging.contracts import DocumentContext, RetrievedChunk
 
 DOCUMENT_ID = UUID("00000000-0000-0000-0000-000000000004")
@@ -89,3 +89,42 @@ def test_found_without_selected_chunks_becomes_insufficient() -> None:
 
     assert decision.status == RetrievalStatus.INSUFFICIENT
     assert decision.chunks == ()
+
+
+def test_summarize_complete_document_preserves_order_without_top_k_selection() -> None:
+    context = DocumentContext(
+        retrieval_status=RetrievalStatus.FOUND,
+        is_complete_document=True,
+        chunks=[
+            _chunk(CHUNK_ID_1, "First page", 1.0),
+            _chunk(CHUNK_ID_2, "Second page", 99.0),
+            _chunk(CHUNK_ID_3, "Third page", 2.0),
+        ],
+    )
+
+    decision = ContextAgent(max_chunks=1).prepare(
+        context,
+        mode=AssistantMode.SUMMARIZE_DOCUMENT,
+    )
+
+    assert decision.status == RetrievalStatus.FOUND
+    assert [chunk.chunk_id for chunk in decision.chunks] == [
+        CHUNK_ID_1,
+        CHUNK_ID_2,
+        CHUNK_ID_3,
+    ]
+    assert decision.total_chars == len("First pageSecond pageThird page")
+
+
+def test_summarize_incomplete_document_returns_insufficient_without_chunks() -> None:
+    context = DocumentContext(
+        retrieval_status=RetrievalStatus.FOUND,
+        is_complete_document=False,
+        chunks=[_chunk(CHUNK_ID_1, "Partial context", 10.0)],
+    )
+
+    decision = ContextAgent().prepare(context, mode=AssistantMode.SUMMARIZE_DOCUMENT)
+
+    assert decision.status == RetrievalStatus.INSUFFICIENT
+    assert decision.chunks == ()
+    assert decision.sources == ()

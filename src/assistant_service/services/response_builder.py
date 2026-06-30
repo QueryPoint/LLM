@@ -19,6 +19,9 @@ CONTEXT_INSUFFICIENT_RESPONSE = (
     "Найденных материалов недостаточно, чтобы дать надёжный ответ. "
     "Попробуйте уточнить запрос или выбрать другой документ."
 )
+SUMMARY_REQUIRES_COMPLETE_DOCUMENT_RESPONSE = (
+    "Для подготовки краткого изложения нужен полный текст выбранного документа."
+)
 
 
 def build_response_text(mode: AssistantMode, context_decision: ContextDecision) -> str:
@@ -45,6 +48,10 @@ def get_response_kind(mode: AssistantMode, context_decision: ContextDecision) ->
         return "insufficient_fallback"
 
     return "temporary_context_ready"
+
+
+def build_summary_requires_complete_document_response() -> str:
+    return SUMMARY_REQUIRES_COMPLETE_DOCUMENT_RESPONSE
 
 
 def _build_document_search_response(context_decision: ContextDecision) -> str:

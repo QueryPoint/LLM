@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from uuid import UUID
 
-from assistant_service.core.enums import RetrievalStatus
+from assistant_service.core.enums import AssistantMode, RetrievalStatus
 from assistant_service.messaging.contracts import DocumentContext, RetrievedChunk
 
 
@@ -37,12 +37,19 @@ class ContextAgent:
         self._max_context_chars = max_context_chars
         self._max_chunks = max_chunks
 
-    def prepare(self, document_context: DocumentContext | None) -> ContextDecision:
+    def prepare(
+        self,
+        document_context: DocumentContext | None,
+        mode: AssistantMode | None = None,
+    ) -> ContextDecision:
         if document_context is None:
             return self._empty_decision(RetrievalStatus.NOT_FOUND)
 
         if document_context.retrieval_status == RetrievalStatus.NOT_FOUND:
             return self._empty_decision(RetrievalStatus.NOT_FOUND)
+
+        if mode == AssistantMode.SUMMARIZE_DOCUMENT:
+            return self._prepare_complete_document(document_context)
 
         ranked_chunks = self._deduplicate(document_context.chunks)
         sorted_chunks = sorted(
@@ -62,6 +69,29 @@ class ContextAgent:
 
         return ContextDecision(
             status=status,
+            chunks=tuple(selected_chunks),
+            sources=sources,
+            total_chars=total_chars,
+        )
+
+    def _prepare_complete_document(
+        self,
+        document_context: DocumentContext,
+    ) -> ContextDecision:
+        if not document_context.is_complete_document:
+            return self._empty_decision(RetrievalStatus.INSUFFICIENT)
+
+        if not document_context.chunks:
+            return self._empty_decision(RetrievalStatus.INSUFFICIENT)
+
+        selected_chunks = self._deduplicate_preserving_order(document_context.chunks)
+        if not selected_chunks:
+            return self._empty_decision(RetrievalStatus.INSUFFICIENT)
+
+        sources = tuple(self._build_source(chunk) for chunk in selected_chunks)
+        total_chars = sum(len(chunk.text) for chunk in selected_chunks)
+        return ContextDecision(
+            status=RetrievalStatus.FOUND,
             chunks=tuple(selected_chunks),
             sources=sources,
             total_chars=total_chars,
@@ -103,6 +133,25 @@ class ContextAgent:
             ranked_chunks.append(best_chunk)
 
         return ranked_chunks
+
+    def _deduplicate_preserving_order(
+        self,
+        chunks: list[RetrievedChunk],
+    ) -> list[RetrievedChunk]:
+        selected_chunks: list[RetrievedChunk] = []
+        seen_chunk_ids: set[UUID] = set()
+        seen_texts: set[str] = set()
+
+        for chunk in chunks:
+            normalized_text = self._normalize_text(chunk.text)
+            if chunk.chunk_id in seen_chunk_ids or normalized_text in seen_texts:
+                continue
+
+            selected_chunks.append(chunk)
+            seen_chunk_ids.add(chunk.chunk_id)
+            seen_texts.add(normalized_text)
+
+        return selected_chunks
 
     def _select_chunks(self, ranked_chunks: list[_RankedChunk]) -> list[RetrievedChunk]:
         selected_chunks: list[RetrievedChunk] = []
