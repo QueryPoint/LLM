@@ -95,7 +95,11 @@ class FakeContextAgent:
     def __init__(self, decision: ContextDecision) -> None:
         self._decision = decision
 
-    def prepare(self, document_context: object) -> ContextDecision:
+    def prepare(
+        self,
+        document_context: object,
+        mode: AssistantMode | None = None,
+    ) -> ContextDecision:
         return self._decision
 
 
@@ -112,6 +116,16 @@ class FakeAnswerAgent:
     ) -> str:
         self.calls.append((mode, user_prompt, context_decision))
         return "Ответ AnswerAgent"
+
+
+class FakeDocumentSummaryAgent:
+    async def summarize(
+        self,
+        *,
+        user_prompt: str | None,
+        context_decision: ContextDecision,
+    ) -> str:
+        return "Summary"
 
 
 def _chunk() -> RetrievedChunk:
@@ -276,6 +290,7 @@ def test_orchestrator_uses_answer_agent_for_answer_question_with_found_context()
         intent_agent=FakeIntentAgent(),
         context_agent=FakeContextAgent(_context_decision()),
         answer_agent=answer_agent,
+        document_summary_agent=FakeDocumentSummaryAgent(),
     )
 
     message = _prompt_message()
