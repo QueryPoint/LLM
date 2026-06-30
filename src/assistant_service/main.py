@@ -1,60 +1,74 @@
+import argparse
+import asyncio
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, Response, status
+import signal
+from collections.abc import Sequence
 
 from assistant_service.core.config import settings
+from assistant_service.messaging.contracts import IncomingMessage
 from assistant_service.messaging.rabbitmq import RabbitMQWorker
 
+logger = logging.getLogger(__name__)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+
+def build_parser() -> argparse.ArgumentParser:
+    return argparse.ArgumentParser(
+        prog="assistant-service",
+        description="Run the assistant-service RabbitMQ worker.",
+    )
+
+
+async def handle_message(message: IncomingMessage) -> None:
+    logger.info(
+        "Valid RabbitMQ message received: request_id=%s user_id=%s type=%s",
+        message.request_id,
+        message.user_id,
+        message.type,
+    )
+
+
+def _install_signal_handlers(stop_event: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+
+    for signal_number in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signal_number, stop_event.set)
+        except NotImplementedError:
+            signal.signal(signal_number, lambda *_: stop_event.set())
+
+
+async def run_worker() -> None:
+    worker = RabbitMQWorker(settings=settings, message_handler=handle_message)
+    stop_event = asyncio.Event()
+    _install_signal_handlers(stop_event)
+
+    await worker.start()
+    logger.info("Assistant service worker started")
+
+    try:
+        await stop_event.wait()
+        logger.info("Shutdown signal received")
+    finally:
+        await worker.stop()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    parser.parse_args(argv)
+
     logging.basicConfig(level=settings.log_level.upper())
 
-    rabbitmq_worker = RabbitMQWorker(settings=settings)
-    app.state.rabbitmq_worker = rabbitmq_worker
-
-    await rabbitmq_worker.start()
     try:
-        yield
-    finally:
-        await rabbitmq_worker.stop()
+        asyncio.run(run_worker())
+    except KeyboardInterrupt:
+        logger.info("Worker interrupted")
+        return 0
+    except Exception:
+        logger.exception("Worker failed")
+        return 1
+
+    return 0
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name, lifespan=lifespan)
-
-    @app.get("/health/live")
-    def live() -> dict[str, str]:
-        return {"status": "ok", "service": settings.app_name}
-
-    @app.get("/health/ready")
-    def ready(response: Response) -> dict[str, str]:
-        rabbitmq_worker = getattr(app.state, "rabbitmq_worker", None)
-        if rabbitmq_worker is None or not rabbitmq_worker.is_ready:
-            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-            return {
-                "status": "not_ready",
-                "service": settings.app_name,
-                "rabbitmq": "disconnected",
-            }
-
-        return {
-            "status": "ready",
-            "service": settings.app_name,
-            "rabbitmq": "connected",
-        }
-
-    @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "service": settings.app_name}
-
-    @app.get("/")
-    def root() -> dict[str, str]:
-        return {"service": settings.app_name, "status": "running"}
-
-    return app
-
-
-app = create_app()
+if __name__ == "__main__":
+    raise SystemExit(main())
