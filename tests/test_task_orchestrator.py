@@ -3,8 +3,14 @@ from uuid import UUID
 
 import pytest
 
+from assistant_service.agents.context_agent import ContextDecision
 from assistant_service.agents.intent_agent import IntentDecision
-from assistant_service.core.enums import AssistantMode, LLMStatus, OutgoingEventType
+from assistant_service.core.enums import (
+    AssistantMode,
+    LLMStatus,
+    OutgoingEventType,
+    RetrievalStatus,
+)
 from assistant_service.messaging.contracts import (
     IncomingMessage,
     OutgoingEvent,
@@ -13,6 +19,7 @@ from assistant_service.messaging.contracts import (
     incoming_message_adapter,
 )
 from assistant_service.services.task_orchestrator import (
+    INTENT_DETECTED_TEXT,
     SAFE_ERROR_RESPONSE,
     STATUS_MESSAGES,
     TaskOrchestrator,
@@ -63,6 +70,21 @@ class FakeIntentAgent:
         )
 
 
+class FakeContextAgent:
+    def __init__(self, status: RetrievalStatus = RetrievalStatus.FOUND) -> None:
+        self.calls: list[object] = []
+        self._status = status
+
+    def prepare(self, document_context: object) -> ContextDecision:
+        self.calls.append(document_context)
+        return ContextDecision(
+            status=self._status,
+            chunks=(),
+            sources=(),
+            total_chars=0,
+        )
+
+
 def _prompt_message() -> IncomingMessage:
     return incoming_message_adapter.validate_python(
         {
@@ -71,6 +93,19 @@ def _prompt_message() -> IncomingMessage:
             "prompt": "Explain normalization",
             "doc": DOC_ID,
             "mode": "summarize_document",
+            "document_context": {
+                "retrieval_status": "found",
+                "chunks": [
+                    {
+                        "chunk_id": "00000000-0000-0000-0000-000000000101",
+                        "document_id": DOC_ID,
+                        "file_name": "lecture.pdf",
+                        "page": 1,
+                        "text": "Context text",
+                        "score": 1.0,
+                    }
+                ],
+            },
         }
     )
 
@@ -87,11 +122,19 @@ def _delete_message() -> IncomingMessage:
 def test_prompt_publishes_think_statuses_then_response() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent()
-    orchestrator = TaskOrchestrator(publisher=publisher, intent_agent=intent_agent)
+    context_agent = FakeContextAgent()
+    orchestrator = TaskOrchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        context_agent=context_agent,
+    )
 
-    asyncio.run(orchestrator.handle(_prompt_message()))
+    message = _prompt_message()
+    asyncio.run(orchestrator.handle(message))
 
     assert [event.type for event in publisher.events] == [
+        OutgoingEventType.THINK,
+        OutgoingEventType.THINK,
         OutgoingEventType.THINK,
         OutgoingEventType.THINK,
         OutgoingEventType.THINK,
@@ -101,6 +144,8 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
     assert [event.data for event in publisher.events[:-1]] == [
         STATUS_MESSAGES[LLMStatus.PROCESSING],
         STATUS_MESSAGES[LLMStatus.THINKING],
+        INTENT_DETECTED_TEXT,
+        STATUS_MESSAGES[LLMStatus.SEARCHING],
         STATUS_MESSAGES[LLMStatus.FOUND],
         STATUS_MESSAGES[LLMStatus.GENERATING],
     ]
@@ -112,12 +157,18 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
             AssistantMode.SUMMARIZE_DOCUMENT,
         )
     ]
+    assert context_agent.calls == [message.document_context]
 
 
 def test_delete_publishes_only_think_confirmation() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent()
-    orchestrator = TaskOrchestrator(publisher=publisher, intent_agent=intent_agent)
+    context_agent = FakeContextAgent()
+    orchestrator = TaskOrchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        context_agent=context_agent,
+    )
 
     asyncio.run(orchestrator.handle(_delete_message()))
 
@@ -125,6 +176,7 @@ def test_delete_publishes_only_think_confirmation() -> None:
     assert publisher.events[0].type == OutgoingEventType.THINK
     assert publisher.events[0].data == "История диалога очищена."
     assert intent_agent.calls == []
+    assert context_agent.calls == []
 
 
 def test_handled_processing_error_publishes_safe_response() -> None:
@@ -132,6 +184,7 @@ def test_handled_processing_error_publishes_safe_response() -> None:
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=FakeIntentAgent(fail=True),
+        context_agent=FakeContextAgent(),
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -145,6 +198,7 @@ def test_safe_response_publish_failure_is_reraised() -> None:
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=FakeIntentAgent(fail=True),
+        context_agent=FakeContextAgent(),
     )
 
     with pytest.raises(RuntimeError):
