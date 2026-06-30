@@ -97,6 +97,21 @@ class FakeContextAgent:
         )
 
 
+class FakeAnswerAgent:
+    def __init__(self) -> None:
+        self.calls: list[tuple[AssistantMode, str | None, ContextDecision]] = []
+
+    async def answer(
+        self,
+        *,
+        mode: AssistantMode,
+        user_prompt: str | None,
+        context_decision: ContextDecision,
+    ) -> str:
+        self.calls.append((mode, user_prompt, context_decision))
+        return "Generated answer"
+
+
 def _chunk() -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=UUID(CHUNK_ID),
@@ -146,10 +161,12 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent(mode=AssistantMode.DOCUMENT_SEARCH)
     context_agent = FakeContextAgent(chunks=(_chunk(),))
+    answer_agent = FakeAnswerAgent()
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
         context_agent=context_agent,
+        answer_agent=answer_agent,
     )
 
     message = _prompt_message()
@@ -186,16 +203,19 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
         )
     ]
     assert context_agent.calls == [message.document_context]
+    assert answer_agent.calls == []
 
 
 def test_delete_publishes_only_think_confirmation() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent()
     context_agent = FakeContextAgent()
+    answer_agent = FakeAnswerAgent()
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
         context_agent=context_agent,
+        answer_agent=answer_agent,
     )
 
     asyncio.run(orchestrator.handle(_delete_message()))
@@ -205,6 +225,7 @@ def test_delete_publishes_only_think_confirmation() -> None:
     assert publisher.events[0].data == "История диалога очищена."
     assert intent_agent.calls == []
     assert context_agent.calls == []
+    assert answer_agent.calls == []
 
 
 def test_handled_processing_error_publishes_safe_response() -> None:
@@ -213,6 +234,7 @@ def test_handled_processing_error_publishes_safe_response() -> None:
         publisher=publisher,
         intent_agent=FakeIntentAgent(fail=True),
         context_agent=FakeContextAgent(),
+        answer_agent=FakeAnswerAgent(),
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -227,6 +249,7 @@ def test_safe_response_publish_failure_is_reraised() -> None:
         publisher=publisher,
         intent_agent=FakeIntentAgent(fail=True),
         context_agent=FakeContextAgent(),
+        answer_agent=FakeAnswerAgent(),
     )
 
     with pytest.raises(RuntimeError):

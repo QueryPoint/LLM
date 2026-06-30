@@ -2,9 +2,15 @@ import logging
 from typing import Protocol
 from uuid import UUID
 
+from assistant_service.agents.answer_agent import AnswerAgent
 from assistant_service.agents.context_agent import ContextAgent
 from assistant_service.agents.intent_agent import IntentAgent
-from assistant_service.core.enums import LLMStatus, OutgoingEventType, RetrievalStatus
+from assistant_service.core.enums import (
+    AssistantMode,
+    LLMStatus,
+    OutgoingEventType,
+    RetrievalStatus,
+)
 from assistant_service.messaging.contracts import (
     DeleteRequestMessage,
     IncomingMessage,
@@ -46,10 +52,12 @@ class TaskOrchestrator:
         publisher: EventPublisher,
         intent_agent: IntentAgent,
         context_agent: ContextAgent,
+        answer_agent: AnswerAgent,
     ) -> None:
         self._publisher = publisher
         self._intent_agent = intent_agent
         self._context_agent = context_agent
+        self._answer_agent = answer_agent
 
     async def handle(self, message: IncomingMessage) -> None:
         try:
@@ -125,22 +133,41 @@ class TaskOrchestrator:
         )
         await self._publish_prompt_status(message.user_id, LLMStatus.GENERATING)
 
-        response_text = build_response_text(
+        if self._should_use_response_builder(
             mode=intent_decision.mode,
-            context_decision=context_decision,
-        )
-        response_kind = get_response_kind(
-            mode=intent_decision.mode,
-            context_decision=context_decision,
-        )
-        logger.info(
-            "Response selected without LLM: user_id=%s mode=%s "
-            "retrieval_status=%s response_kind=%s",
-            message.user_id,
-            intent_decision.mode.value,
-            context_decision.status.value,
-            response_kind,
-        )
+            retrieval_status=context_decision.status,
+        ):
+            response_text = build_response_text(
+                mode=intent_decision.mode,
+                context_decision=context_decision,
+            )
+            response_kind = get_response_kind(
+                mode=intent_decision.mode,
+                context_decision=context_decision,
+            )
+            logger.info(
+                "Response selected without LLM: user_id=%s mode=%s "
+                "retrieval_status=%s response_kind=%s",
+                message.user_id,
+                intent_decision.mode.value,
+                context_decision.status.value,
+                response_kind,
+            )
+        else:
+            logger.info(
+                "Answer generation selected: user_id=%s mode=%s "
+                "retrieval_status=%s selected_chunks=%s",
+                message.user_id,
+                intent_decision.mode.value,
+                context_decision.status.value,
+                len(context_decision.chunks),
+            )
+            response_text = await self._answer_agent.answer(
+                mode=intent_decision.mode,
+                user_prompt=message.prompt,
+                context_decision=context_decision,
+            )
+
         await self._publish_response(user_id=message.user_id, data=response_text)
 
     async def _handle_delete(self, message: DeleteRequestMessage) -> None:
@@ -190,6 +217,17 @@ class TaskOrchestrator:
             return
 
         await self._publish_think(user_id=user_id, data=CONTEXT_INSUFFICIENT_TEXT)
+
+    @staticmethod
+    def _should_use_response_builder(
+        *,
+        mode: AssistantMode,
+        retrieval_status: RetrievalStatus,
+    ) -> bool:
+        return (
+            mode == AssistantMode.DOCUMENT_SEARCH
+            or retrieval_status != RetrievalStatus.FOUND
+        )
 
     async def _publish_response(self, user_id: UUID, data: str) -> None:
         await self._publisher.publish_event(
