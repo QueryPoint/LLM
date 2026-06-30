@@ -57,15 +57,18 @@ class RabbitMQPublisher:
         payload = outgoing_event_adapter.dump_python(event, mode="json")
         await self._publish_json(payload)
         logger.info(
-            "Outgoing event published: request_id=%s user_id=%s type=%s",
-            event.request_id,
+            "Outgoing event published: user_id=%s type=%s",
             event.user_id,
             event.type,
         )
 
 
 class RabbitMQWorker:
-    def __init__(self, settings: Settings, message_handler: MessageHandler) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        message_handler: MessageHandler | None = None,
+    ) -> None:
         self._settings = settings
         self._message_handler = message_handler
         self._connection: AbstractRobustConnection | None = None
@@ -73,6 +76,15 @@ class RabbitMQWorker:
         self._queue: AbstractRobustQueue | None = None
         self._consumer_tag: str | None = None
         self.publisher: RabbitMQPublisher | None = None
+
+    def set_message_handler(self, message_handler: MessageHandler) -> None:
+        self._message_handler = message_handler
+
+    async def publish_event(self, event: OutgoingEvent) -> None:
+        if self.publisher is None:
+            raise RuntimeError("RabbitMQ publisher is not ready")
+
+        await self.publisher.publish_event(event)
 
     @property
     def is_ready(self) -> bool:
@@ -85,6 +97,9 @@ class RabbitMQWorker:
         )
 
     async def start(self) -> None:
+        if self._message_handler is None:
+            raise RuntimeError("RabbitMQ message handler is not configured")
+
         logger.info("RabbitMQ connection started")
         try:
             self._connection = await aio_pika.connect_robust(
@@ -148,8 +163,7 @@ class RabbitMQWorker:
             return
 
         logger.info(
-            "Incoming message accepted: request_id=%s user_id=%s type=%s",
-            request.request_id,
+            "Incoming message accepted: user_id=%s type=%s",
             request.user_id,
             request.type,
         )
@@ -158,8 +172,7 @@ class RabbitMQWorker:
             await self._process_request(request)
         except Exception:
             logger.exception(
-                "Unexpected handler error: request_id=%s user_id=%s",
-                request.request_id,
+                "Unexpected handler error: user_id=%s",
                 request.user_id,
             )
             await asyncio.sleep(self._settings.rabbitmq_requeue_delay_seconds)
@@ -169,4 +182,7 @@ class RabbitMQWorker:
         await message.ack()
 
     async def _process_request(self, request: IncomingMessage) -> None:
+        if self._message_handler is None:
+            raise RuntimeError("RabbitMQ message handler is not configured")
+
         await self._message_handler(request)
