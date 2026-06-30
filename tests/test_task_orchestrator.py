@@ -16,6 +16,7 @@ from assistant_service.messaging.contracts import (
     OutgoingEvent,
     ResponseEvent,
     ThinkEvent,
+    RetrievedChunk,
     incoming_message_adapter,
 )
 from assistant_service.services.task_orchestrator import (
@@ -28,6 +29,7 @@ from assistant_service.services.task_orchestrator import (
 
 USER_ID = "00000000-0000-0000-0000-000000000002"
 DOC_ID = "00000000-0000-0000-0000-000000000004"
+CHUNK_ID = "00000000-0000-0000-0000-000000000101"
 
 
 class FakePublisher:
@@ -51,9 +53,14 @@ class FakePublisher:
 
 
 class FakeIntentAgent:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(
+        self,
+        fail: bool = False,
+        mode: AssistantMode = AssistantMode.ANSWER_QUESTION,
+    ) -> None:
         self.calls: list[tuple[str | None, UUID | None, AssistantMode | None]] = []
         self._fail = fail
+        self._mode = mode
 
     def detect(
         self,
@@ -65,24 +72,40 @@ class FakeIntentAgent:
         if self._fail:
             raise RuntimeError("intent detection failed")
         return IntentDecision(
-            mode=AssistantMode.ANSWER_QUESTION,
+            mode=self._mode,
             source="rule_based",
         )
 
 
 class FakeContextAgent:
-    def __init__(self, status: RetrievalStatus = RetrievalStatus.FOUND) -> None:
+    def __init__(
+        self,
+        status: RetrievalStatus = RetrievalStatus.FOUND,
+        chunks: tuple[RetrievedChunk, ...] = (),
+    ) -> None:
         self.calls: list[object] = []
         self._status = status
+        self._chunks = chunks
 
     def prepare(self, document_context: object) -> ContextDecision:
         self.calls.append(document_context)
         return ContextDecision(
             status=self._status,
-            chunks=(),
+            chunks=self._chunks,
             sources=(),
-            total_chars=0,
+            total_chars=sum(len(chunk.text) for chunk in self._chunks),
         )
+
+
+def _chunk() -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=UUID(CHUNK_ID),
+        document_id=UUID(DOC_ID),
+        file_name="lecture.pdf",
+        page=3,
+        text="RabbitMQ — брокер сообщений.",
+        score=9.42,
+    )
 
 
 def _prompt_message() -> IncomingMessage:
@@ -121,8 +144,8 @@ def _delete_message() -> IncomingMessage:
 
 def test_prompt_publishes_think_statuses_then_response() -> None:
     publisher = FakePublisher()
-    intent_agent = FakeIntentAgent()
-    context_agent = FakeContextAgent()
+    intent_agent = FakeIntentAgent(mode=AssistantMode.DOCUMENT_SEARCH)
+    context_agent = FakeContextAgent(chunks=(_chunk(),))
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
@@ -150,6 +173,11 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
         STATUS_MESSAGES[LLMStatus.GENERATING],
     ]
     assert publisher.events[-1].warning == 0
+    assert publisher.events[-1].data == (
+        "Нашёл подходящие фрагменты:\n\n"
+        "1. lecture.pdf, стр. 3\n"
+        "RabbitMQ — брокер сообщений."
+    )
     assert intent_agent.calls == [
         (
             "Explain normalization",
