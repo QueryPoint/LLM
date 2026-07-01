@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from numbers import Real
 
 from google import genai
@@ -14,8 +15,41 @@ class GeminiClientError(RuntimeError):
     """Raised when Gemini generation cannot be completed safely."""
 
 
+class GeminiRequestLimitError(GeminiClientError):
+    """Локальный лимит prompt/chunks/response превышен."""
+
+
+class GeminiRateLimitError(GeminiClientError):
+    """Gemini вернул rate limit / quota exhaustion."""
+
+
+class GeminiTransientError(GeminiClientError):
+    """Временная ошибка Gemini после исчерпания retry."""
+
+
+class GeminiPermanentError(GeminiClientError):
+    """Неповторяемая Gemini API ошибка."""
+
+
+RATE_LIMIT_STATUS_CODE = 429
+TRANSIENT_STATUS_CODES = frozenset({408, 500, 502, 503, 504})
+PERMANENT_STATUS_CODES = frozenset({400, 401, 403, 404, 413, 422})
+
+
 class GeminiClient:
-    def __init__(self, api_key: str, model: str, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        timeout_seconds: int,
+        *,
+        retry_max_attempts: int,
+        retry_initial_delay_seconds: float,
+        retry_max_delay_seconds: float,
+        max_user_prompt_chars: int,
+        max_prompt_chars: int,
+        max_response_chars: int,
+    ) -> None:
         normalized_api_key = api_key.strip()
         normalized_model = model.strip()
 
@@ -25,9 +59,33 @@ class GeminiClient:
             raise ValueError("model must not be empty")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if retry_max_attempts <= 0:
+            raise ValueError("retry_max_attempts must be positive")
+        if retry_initial_delay_seconds <= 0:
+            raise ValueError("retry_initial_delay_seconds must be positive")
+        if retry_max_delay_seconds <= 0:
+            raise ValueError("retry_max_delay_seconds must be positive")
+        if retry_max_delay_seconds < retry_initial_delay_seconds:
+            raise ValueError(
+                "retry_max_delay_seconds must be greater than or equal to "
+                "retry_initial_delay_seconds"
+            )
+        if max_user_prompt_chars <= 0:
+            raise ValueError("max_user_prompt_chars must be positive")
+        if max_prompt_chars <= 0:
+            raise ValueError("max_prompt_chars must be positive")
+        if max_response_chars <= 0:
+            raise ValueError("max_response_chars must be positive")
 
         self._model = normalized_model
         self._timeout_seconds = timeout_seconds
+        self._retry_max_attempts = retry_max_attempts
+        self._retry_initial_delay_seconds = retry_initial_delay_seconds
+        self._retry_max_delay_seconds = retry_max_delay_seconds
+        self._max_user_prompt_chars = max_user_prompt_chars
+        self._max_prompt_chars = max_prompt_chars
+        self._max_response_chars = max_response_chars
+        self._sleep = asyncio.sleep
         self._client = genai.Client(
             api_key=normalized_api_key,
             http_options=types.HttpOptions(timeout=timeout_seconds * 1000),
@@ -55,18 +113,15 @@ class GeminiClient:
             temperature=temperature,
         )
 
-        try:
+        async def request() -> str:
             response = await self._client.aio.models.generate_content(
                 model=self._model,
                 contents=normalized_prompt,
                 config=generation_config,
             )
             return self._extract_text(response)
-        except GeminiClientError:
-            raise
-        except Exception as exc:
-            self._log_generation_exception("generate_text", exc)
-            raise GeminiClientError("Gemini text generation failed.") from exc
+
+        return await self._run_with_retries("generate_text", request)
 
     async def stream_text(
         self,
@@ -90,26 +145,47 @@ class GeminiClient:
             temperature=temperature,
         )
         emitted_fragments = 0
+        total_response_chars = 0
 
-        try:
-            stream = await self._client.aio.models.generate_content_stream(
-                model=self._model,
-                contents=normalized_prompt,
-                config=generation_config,
-            )
+        for attempt_index in range(self._retry_max_attempts):
+            try:
+                stream = await self._client.aio.models.generate_content_stream(
+                    model=self._model,
+                    contents=normalized_prompt,
+                    config=generation_config,
+                )
 
-            async for chunk in stream:
-                text = self._extract_optional_stream_text(chunk)
-                if text is None:
-                    continue
+                async for chunk in stream:
+                    text = self._extract_optional_stream_text(chunk)
+                    if text is None:
+                        continue
 
-                emitted_fragments += 1
-                yield text
-        except GeminiClientError:
-            raise
-        except Exception as exc:
-            self._log_generation_exception("stream_text", exc)
-            raise GeminiClientError("Gemini streaming generation failed.") from exc
+                    if total_response_chars + len(text) > self._max_response_chars:
+                        raise GeminiRequestLimitError(
+                            "Gemini response exceeds configured character limit."
+                        )
+
+                    emitted_fragments += 1
+                    total_response_chars += len(text)
+                    yield text
+                break
+            except GeminiClientError:
+                raise
+            except Exception as exc:
+                if emitted_fragments > 0:
+                    self._log_generation_failure("stream_text", exc)
+                    raise GeminiTransientError(
+                        "Gemini streaming generation failed after partial response."
+                    ) from exc
+
+                if not await self._handle_retryable_exception(
+                    operation="stream_text",
+                    exc=exc,
+                    attempt_index=attempt_index,
+                ):
+                    raise
+        else:
+            raise GeminiTransientError("Gemini streaming generation failed.")
 
         if emitted_fragments == 0:
             raise GeminiClientError("Gemini streaming response did not contain text.")
@@ -136,6 +212,14 @@ class GeminiClient:
             raise ValueError("max_output_tokens must be positive")
         if not isinstance(temperature, Real) or not 0.0 <= temperature <= 1.0:
             raise ValueError("temperature must be between 0.0 and 1.0")
+        if (
+            len(normalized_prompt) > self._max_prompt_chars
+            or len(normalized_system_instruction) + len(normalized_prompt)
+            > self._max_prompt_chars
+        ):
+            raise GeminiRequestLimitError(
+                "Gemini prompt exceeds configured character limit."
+            )
 
         return normalized_system_instruction, normalized_prompt
 
@@ -152,11 +236,14 @@ class GeminiClient:
             temperature=temperature,
         )
 
-    @staticmethod
-    def _extract_text(response: object) -> str:
+    def _extract_text(self, response: object) -> str:
         text = GeminiClient._extract_optional_text(response)
         if text is None:
             raise GeminiClientError("Gemini response did not contain text.")
+        if len(text) > self._max_response_chars:
+            raise GeminiRequestLimitError(
+                "Gemini response exceeds configured character limit."
+            )
         return text
 
     @staticmethod
@@ -179,13 +266,97 @@ class GeminiClient:
 
         return text
 
-    def _log_generation_exception(self, operation: str, exc: Exception) -> None:
-        logger.exception(
-            "Gemini generation failed: operation=%s model=%s "
-            "timeout_seconds=%s error_type=%s",
+    async def _run_with_retries(
+        self,
+        operation: str,
+        request: Callable[[], Awaitable[str]],
+    ) -> str:
+        for attempt_index in range(self._retry_max_attempts):
+            try:
+                return await request()
+            except GeminiClientError:
+                raise
+            except Exception as exc:
+                if not await self._handle_retryable_exception(
+                    operation=operation,
+                    exc=exc,
+                    attempt_index=attempt_index,
+                ):
+                    raise
+
+        raise GeminiTransientError("Gemini generation failed.")
+
+    async def _handle_retryable_exception(
+        self,
+        *,
+        operation: str,
+        exc: Exception,
+        attempt_index: int,
+    ) -> bool:
+        status_code = self._extract_status_code(exc)
+        is_rate_limit = status_code == RATE_LIMIT_STATUS_CODE
+        is_transient = is_rate_limit or self._is_transient_exception(exc, status_code)
+
+        if not is_transient:
+            self._log_generation_failure(operation, exc)
+            raise GeminiPermanentError("Gemini request failed permanently.") from exc
+
+        if attempt_index >= self._retry_max_attempts - 1:
+            self._log_generation_failure(operation, exc)
+            if is_rate_limit:
+                raise GeminiRateLimitError("Gemini rate limit exceeded.") from exc
+            raise GeminiTransientError("Gemini request failed after retries.") from exc
+
+        logger.warning(
+            "Gemini request retry: operation=%s attempt=%s status_code=%s "
+            "error_type=%s",
             operation,
-            self._model,
-            self._timeout_seconds,
+            attempt_index + 1,
+            status_code,
+            type(exc).__name__,
+        )
+        await self._sleep(self._retry_delay(attempt_index))
+        return True
+
+    def _retry_delay(self, retry_index: int) -> float:
+        return min(
+            self._retry_initial_delay_seconds * (2**retry_index),
+            self._retry_max_delay_seconds,
+        )
+
+    @staticmethod
+    def _extract_status_code(exc: Exception) -> int | None:
+        for attribute_name in ("code", "status_code"):
+            value = getattr(exc, attribute_name, None)
+            if isinstance(value, int):
+                return value
+
+        response = getattr(exc, "response", None)
+        value = getattr(response, "status_code", None)
+        if isinstance(value, int):
+            return value
+        return None
+
+    @staticmethod
+    def _is_transient_exception(exc: Exception, status_code: int | None) -> bool:
+        if status_code in TRANSIENT_STATUS_CODES:
+            return True
+        if status_code in PERMANENT_STATUS_CODES:
+            return False
+        if isinstance(exc, asyncio.TimeoutError):
+            return True
+
+        error_type = type(exc).__name__.lower()
+        return any(
+            marker in error_type
+            for marker in ("timeout", "connecterror", "connectionerror", "network")
+        )
+
+    def _log_generation_failure(self, operation: str, exc: Exception) -> None:
+        logger.warning(
+            "Gemini request failed: operation=%s status_code=%s error_type=%s",
+            operation,
+            self._extract_status_code(exc),
             type(exc).__name__,
         )
 
@@ -198,4 +369,10 @@ def create_gemini_client_from_settings(settings: Settings) -> GeminiClient:
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
         timeout_seconds=settings.gemini_timeout_seconds,
+        retry_max_attempts=settings.gemini_retry_max_attempts,
+        retry_initial_delay_seconds=settings.gemini_retry_initial_delay_seconds,
+        retry_max_delay_seconds=settings.gemini_retry_max_delay_seconds,
+        max_user_prompt_chars=settings.gemini_max_user_prompt_chars,
+        max_prompt_chars=settings.gemini_max_prompt_chars,
+        max_response_chars=settings.gemini_max_response_chars,
     )
