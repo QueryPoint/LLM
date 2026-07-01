@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
     gemini_timeout_seconds: int = Field(default=60, gt=0)
+    redis_url: str = "redis://localhost:6379/0"
+    redis_answer_cache_ttl_seconds: int = Field(default=900, gt=0)
+    redis_intent_cache_ttl_seconds: int = Field(default=900, gt=0)
+    redis_task_status_ttl_seconds: int = Field(default=3600, gt=0)
+    redis_session_summary_ttl_seconds: int = Field(default=21600, gt=0)
+    redis_answer_lock_ttl_seconds: int = Field(default=90, gt=0)
 
     @field_validator("gemini_api_key", mode="before")
     @classmethod
@@ -30,18 +36,18 @@ class Settings(BaseSettings):
             return stripped_value or None
         return value
 
-    @field_validator("gemini_model", mode="before")
+    @field_validator("gemini_model", "redis_url", mode="before")
     @classmethod
     def _strip_required_text(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip()
         return value
 
-    @field_validator("gemini_model")
+    @field_validator("gemini_model", "redis_url")
     @classmethod
     def _validate_required_text(cls, value: str) -> str:
         if value == "":
-            raise ValueError("gemini_model must not be empty")
+            raise ValueError("required text setting must not be empty")
         return value
 
 
