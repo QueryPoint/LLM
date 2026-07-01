@@ -128,6 +128,32 @@ class FakeDocumentSummaryAgent:
         return "Summary"
 
 
+class FakeRedisState:
+    async def get_answer(self, key: str) -> None:
+        return None
+
+    async def set_answer(self, key: str, answer: str) -> None:
+        return None
+
+    async def acquire_answer_lock(self, *, lock_key: str) -> None:
+        return None
+
+    async def release_answer_lock(self, lock: object) -> None:
+        return None
+
+    async def get_intent_mode(self, key: str) -> None:
+        return None
+
+    async def set_intent_mode(self, key: str, mode: AssistantMode) -> None:
+        return None
+
+    async def set_task_status(self, *, user_id: UUID, status: str) -> None:
+        return None
+
+    async def clear_user_state(self, *, user_id: UUID) -> None:
+        return None
+
+
 def _chunk() -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=UUID(CHUNK_ID),
@@ -291,6 +317,7 @@ def test_orchestrator_uses_answer_agent_for_answer_question_with_found_context()
         context_agent=FakeContextAgent(_context_decision()),
         answer_agent=answer_agent,
         document_summary_agent=FakeDocumentSummaryAgent(),
+        redis_state=FakeRedisState(),
     )
 
     message = _prompt_message()

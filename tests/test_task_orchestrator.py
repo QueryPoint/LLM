@@ -130,6 +130,46 @@ class FakeDocumentSummaryAgent:
         return "Document summary"
 
 
+class FakeRedisState:
+    def __init__(self, cached_answer: str | None = None) -> None:
+        self.cached_answer = cached_answer
+        self.answer_get_keys: list[str] = []
+        self.answer_set_calls: list[tuple[str, str]] = []
+        self.intent_get_keys: list[str] = []
+        self.intent_set_calls: list[tuple[str, AssistantMode]] = []
+        self.task_statuses: list[tuple[UUID, str]] = []
+        self.lock_keys: list[str] = []
+        self.release_calls: list[object] = []
+        self.clear_user_state_calls: list[UUID] = []
+
+    async def get_answer(self, key: str) -> str | None:
+        self.answer_get_keys.append(key)
+        return self.cached_answer
+
+    async def set_answer(self, key: str, answer: str) -> None:
+        self.answer_set_calls.append((key, answer))
+
+    async def acquire_answer_lock(self, *, lock_key: str) -> None:
+        self.lock_keys.append(lock_key)
+        return None
+
+    async def release_answer_lock(self, lock: object) -> None:
+        self.release_calls.append(lock)
+
+    async def get_intent_mode(self, key: str) -> AssistantMode | None:
+        self.intent_get_keys.append(key)
+        return None
+
+    async def set_intent_mode(self, key: str, mode: AssistantMode) -> None:
+        self.intent_set_calls.append((key, mode))
+
+    async def set_task_status(self, *, user_id: UUID, status: str) -> None:
+        self.task_statuses.append((user_id, status))
+
+    async def clear_user_state(self, *, user_id: UUID) -> None:
+        self.clear_user_state_calls.append(user_id)
+
+
 def _chunk() -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=UUID(CHUNK_ID),
@@ -187,6 +227,7 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
         context_agent=context_agent,
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
+        redis_state=FakeRedisState(),
     )
 
     message = _prompt_message()
@@ -241,6 +282,7 @@ def test_answer_question_found_context_publishes_single_buffered_response() -> N
         context_agent=context_agent,
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
+        redis_state=FakeRedisState(),
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -265,6 +307,37 @@ def test_answer_question_found_context_publishes_single_buffered_response() -> N
     assert document_summary_agent.calls == []
 
 
+def test_answer_question_found_context_uses_cached_answer_without_agent() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(mode=AssistantMode.ANSWER_QUESTION)
+    context_agent = FakeContextAgent(chunks=(_chunk(),))
+    answer_agent = FakeAnswerAgent()
+    redis_state = FakeRedisState(cached_answer="Cached answer")
+    orchestrator = TaskOrchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        context_agent=context_agent,
+        answer_agent=answer_agent,
+        document_summary_agent=FakeDocumentSummaryAgent(),
+        redis_state=redis_state,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message()))
+
+    response_events = [
+        event for event in publisher.events if event.type == OutgoingEventType.RESPONSE
+    ]
+    assert len(response_events) == 1
+    assert response_events[0].data == "Cached answer"
+    assert answer_agent.calls == []
+    assert redis_state.answer_get_keys
+    assert redis_state.answer_set_calls == []
+    assert redis_state.lock_keys == []
+    assert {event.type.value for event in publisher.events} == {"think", "response"}
+    assert "processing" in [status for _, status in redis_state.task_statuses]
+    assert redis_state.task_statuses[-1] == (UUID(USER_ID), "completed")
+
+
 def test_summarize_document_found_context_uses_document_summary_agent() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent(mode=AssistantMode.SUMMARIZE_DOCUMENT)
@@ -277,6 +350,7 @@ def test_summarize_document_found_context_uses_document_summary_agent() -> None:
         context_agent=context_agent,
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
+        redis_state=FakeRedisState(),
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -297,12 +371,14 @@ def test_delete_publishes_only_think_confirmation() -> None:
     context_agent = FakeContextAgent()
     answer_agent = FakeAnswerAgent()
     document_summary_agent = FakeDocumentSummaryAgent()
+    redis_state = FakeRedisState()
     orchestrator = TaskOrchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
         context_agent=context_agent,
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
+        redis_state=redis_state,
     )
 
     asyncio.run(orchestrator.handle(_delete_message()))
@@ -314,6 +390,7 @@ def test_delete_publishes_only_think_confirmation() -> None:
     assert context_agent.calls == []
     assert answer_agent.calls == []
     assert document_summary_agent.calls == []
+    assert redis_state.clear_user_state_calls == [UUID(USER_ID)]
 
 
 def test_handled_processing_error_publishes_safe_response() -> None:
@@ -324,6 +401,7 @@ def test_handled_processing_error_publishes_safe_response() -> None:
         context_agent=FakeContextAgent(),
         answer_agent=FakeAnswerAgent(),
         document_summary_agent=FakeDocumentSummaryAgent(),
+        redis_state=FakeRedisState(),
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -340,6 +418,7 @@ def test_safe_response_publish_failure_is_reraised() -> None:
         context_agent=FakeContextAgent(),
         answer_agent=FakeAnswerAgent(),
         document_summary_agent=FakeDocumentSummaryAgent(),
+        redis_state=FakeRedisState(),
     )
 
     with pytest.raises(RuntimeError):

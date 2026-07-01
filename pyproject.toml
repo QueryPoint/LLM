@@ -10,6 +10,7 @@ dependencies = [
     "aio-pika>=9.6.2",
     "google-genai>=2.10.0",
     "pydantic-settings>=2.14.2",
+    "redis>=8.0.1",
 ]
 
 [build-system]
