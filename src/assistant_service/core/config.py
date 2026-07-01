@@ -1,4 +1,4 @@
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
     gemini_timeout_seconds: int = Field(default=60, gt=0)
+    gemini_retry_max_attempts: int = Field(default=3, ge=1, le=5)
+    gemini_retry_initial_delay_seconds: float = Field(default=0.5, gt=0, le=10)
+    gemini_retry_max_delay_seconds: float = Field(default=4.0, gt=0, le=30)
+    gemini_max_user_prompt_chars: int = Field(default=4_000, gt=0)
+    gemini_max_chunk_chars: int = Field(default=12_000, gt=0)
+    gemini_max_chunks_per_request: int = Field(default=32, gt=0)
+    gemini_max_prompt_chars: int = Field(default=16_000, gt=0)
+    gemini_max_response_chars: int = Field(default=12_000, gt=0)
+    rabbitmq_max_processing_attempts: int = Field(default=3, ge=1, le=5)
     redis_url: str = "redis://localhost:6379/0"
     redis_answer_cache_ttl_seconds: int = Field(default=900, gt=0)
     redis_intent_cache_ttl_seconds: int = Field(default=900, gt=0)
@@ -49,6 +58,15 @@ class Settings(BaseSettings):
         if value == "":
             raise ValueError("required text setting must not be empty")
         return value
+
+    @model_validator(mode="after")
+    def _validate_retry_delays(self) -> "Settings":
+        if self.gemini_retry_max_delay_seconds < self.gemini_retry_initial_delay_seconds:
+            raise ValueError(
+                "gemini_retry_max_delay_seconds must be greater than or equal to "
+                "gemini_retry_initial_delay_seconds"
+            )
+        return self
 
 
 settings = Settings()
