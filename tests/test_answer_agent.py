@@ -24,6 +24,9 @@ from assistant_service.services.task_orchestrator import TaskOrchestrator
 USER_ID = "00000000-0000-0000-0000-000000000002"
 DOCUMENT_ID = "00000000-0000-0000-0000-000000000003"
 CHUNK_ID = "00000000-0000-0000-0000-000000000004"
+MAX_USER_PROMPT_CHARS = 4_000
+MAX_CHUNK_CHARS = 12_000
+MAX_CHUNKS_PER_REQUEST = 32
 
 
 class FakeTextGenerator:
@@ -318,6 +321,9 @@ def test_orchestrator_uses_answer_agent_for_answer_question_with_found_context()
         answer_agent=answer_agent,
         document_summary_agent=FakeDocumentSummaryAgent(),
         redis_state=FakeRedisState(),
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
     )
 
     message = _prompt_message()
