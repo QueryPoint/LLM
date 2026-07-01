@@ -1,11 +1,12 @@
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 from uuid import UUID
 
 from assistant_service.agents.answer_agent import AnswerAgent
-from assistant_service.agents.context_agent import ContextAgent
+from assistant_service.agents.context_agent import ContextAgent, ContextDecision
 from assistant_service.agents.document_summary_agent import DocumentSummaryAgent
-from assistant_service.agents.intent_agent import IntentAgent
+from assistant_service.agents.intent_agent import IntentAgent, IntentDecision
 from assistant_service.core.enums import (
     AssistantMode,
     LLMStatus,
@@ -25,6 +26,12 @@ from assistant_service.services.response_builder import (
     build_response_text,
     get_response_kind,
 )
+from assistant_service.services.cache_keys import (
+    build_answer_cache_key,
+    build_answer_lock_key,
+    build_intent_cache_key,
+)
+from assistant_service.services.redis_state import RedisStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +63,14 @@ class TaskOrchestrator:
         context_agent: ContextAgent,
         answer_agent: AnswerAgent,
         document_summary_agent: DocumentSummaryAgent,
+        redis_state: RedisStateStore,
     ) -> None:
         self._publisher = publisher
         self._intent_agent = intent_agent
         self._context_agent = context_agent
         self._answer_agent = answer_agent
         self._document_summary_agent = document_summary_agent
+        self._redis_state = redis_state
 
     async def handle(self, message: IncomingMessage) -> None:
         try:
@@ -79,10 +88,15 @@ class TaskOrchestrator:
                 message.user_id,
                 message.type,
             )
+            await self._redis_state.set_task_status(
+                user_id=message.user_id,
+                status="failed",
+            )
             try:
                 await self._publish_response(
                     user_id=message.user_id,
                     data=SAFE_ERROR_RESPONSE,
+                    mark_completed=False,
                 )
                 return
             except Exception:
@@ -104,11 +118,7 @@ class TaskOrchestrator:
         await self._publish_prompt_status(message.user_id, LLMStatus.PROCESSING)
         await self._publish_prompt_status(message.user_id, LLMStatus.THINKING)
 
-        intent_decision = self._intent_agent.detect(
-            prompt=message.prompt,
-            document_id=message.doc,
-            requested_mode=message.mode,
-        )
+        intent_decision = await self._detect_intent(message)
         logger.info(
             "Intent detected: user_id=%s selected_mode=%s "
             "selection_source=%s has_document=%s",
@@ -181,9 +191,15 @@ class TaskOrchestrator:
                 context_decision.status.value,
                 len(context_decision.chunks),
             )
-            response_text = await self._document_summary_agent.summarize(
+            response_text = await self._get_or_generate_answer(
+                user_id=message.user_id,
+                mode=intent_decision.mode,
                 user_prompt=message.prompt,
                 context_decision=context_decision,
+                generator=lambda: self._document_summary_agent.summarize(
+                    user_prompt=message.prompt,
+                    context_decision=context_decision,
+                ),
             )
         else:
             logger.info(
@@ -194,10 +210,16 @@ class TaskOrchestrator:
                 context_decision.status.value,
                 len(context_decision.chunks),
             )
-            response_text = await self._answer_agent.answer(
+            response_text = await self._get_or_generate_answer(
+                user_id=message.user_id,
                 mode=intent_decision.mode,
                 user_prompt=message.prompt,
                 context_decision=context_decision,
+                generator=lambda: self._answer_agent.answer(
+                    mode=intent_decision.mode,
+                    user_prompt=message.prompt,
+                    context_decision=context_decision,
+                ),
             )
 
         await self._publish_response(user_id=message.user_id, data=response_text)
@@ -207,7 +229,68 @@ class TaskOrchestrator:
             "Task orchestrator received delete: user_id=%s",
             message.user_id,
         )
+        await self._redis_state.clear_user_state(user_id=message.user_id)
         await self._publish_think(user_id=message.user_id, data=DELETE_THINK_TEXT)
+
+    async def _detect_intent(self, message: PromptRequestMessage) -> IntentDecision:
+        if message.mode is not None:
+            return self._intent_agent.detect(
+                prompt=message.prompt,
+                document_id=message.doc,
+                requested_mode=message.mode,
+            )
+
+        intent_cache_key = build_intent_cache_key(
+            prompt=message.prompt,
+            document_id=message.doc,
+            requested_mode=None,
+        )
+        cached_mode = await self._redis_state.get_intent_mode(intent_cache_key)
+        if cached_mode is not None:
+            return IntentDecision(mode=cached_mode, source="rule_based")
+
+        decision = self._intent_agent.detect(
+            prompt=message.prompt,
+            document_id=message.doc,
+            requested_mode=None,
+        )
+        await self._redis_state.set_intent_mode(intent_cache_key, decision.mode)
+        return decision
+
+    async def _get_or_generate_answer(
+        self,
+        *,
+        user_id: UUID,
+        mode: AssistantMode,
+        user_prompt: str | None,
+        context_decision: ContextDecision,
+        generator: Callable[[], Awaitable[str]],
+    ) -> str:
+        answer_cache_key = build_answer_cache_key(
+            user_id=user_id,
+            mode=mode,
+            user_prompt=user_prompt,
+            context_decision=context_decision,
+        )
+        cached_answer = await self._redis_state.get_answer(answer_cache_key)
+        if cached_answer is not None:
+            logger.info(
+                "Answer cache hit: user_id=%s mode=%s",
+                user_id,
+                mode.value,
+            )
+            return cached_answer
+
+        lock = await self._redis_state.acquire_answer_lock(
+            lock_key=build_answer_lock_key(answer_cache_key)
+        )
+        try:
+            answer = await generator()
+            await self._redis_state.set_answer(answer_cache_key, answer)
+            return answer
+        finally:
+            if lock is not None:
+                await self._redis_state.release_answer_lock(lock)
 
     async def _publish_think(
         self,
@@ -227,6 +310,11 @@ class TaskOrchestrator:
             user_id,
             status.value if status is not None else None,
         )
+        if status is not None:
+            await self._redis_state.set_task_status(
+                user_id=user_id,
+                status=status.value.lower(),
+            )
 
     async def _publish_prompt_status(self, user_id: UUID, status: LLMStatus) -> None:
         await self._publish_think(
@@ -246,9 +334,17 @@ class TaskOrchestrator:
 
         if retrieval_status == RetrievalStatus.NOT_FOUND:
             await self._publish_think(user_id=user_id, data=CONTEXT_NOT_FOUND_TEXT)
+            await self._redis_state.set_task_status(
+                user_id=user_id,
+                status="not_found",
+            )
             return
 
         await self._publish_think(user_id=user_id, data=CONTEXT_INSUFFICIENT_TEXT)
+        await self._redis_state.set_task_status(
+            user_id=user_id,
+            status="insufficient",
+        )
 
     @staticmethod
     def _should_use_response_builder(
@@ -272,7 +368,13 @@ class TaskOrchestrator:
             and retrieval_status == RetrievalStatus.INSUFFICIENT
         )
 
-    async def _publish_response(self, user_id: UUID, data: str) -> None:
+    async def _publish_response(
+        self,
+        user_id: UUID,
+        data: str,
+        *,
+        mark_completed: bool = True,
+    ) -> None:
         await self._publisher.publish_event(
             ResponseEvent(
                 type=OutgoingEventType.RESPONSE,
@@ -281,3 +383,8 @@ class TaskOrchestrator:
                 warning=0,
             )
         )
+        if mark_completed:
+            await self._redis_state.set_task_status(
+                user_id=user_id,
+                status="completed",
+            )
