@@ -14,6 +14,10 @@ from assistant_service.services.gemini_client import (
     GeminiClient,
     create_gemini_client_from_settings,
 )
+from assistant_service.services.redis_state import (
+    RedisStateStore,
+    create_redis_state_store_from_settings,
+)
 from assistant_service.services.task_orchestrator import TaskOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -39,10 +43,12 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
 async def run_worker() -> None:
     worker = RabbitMQWorker(settings=settings)
     gemini_client: GeminiClient | None = None
+    redis_state: RedisStateStore | None = None
     intent_agent = IntentAgent()
     context_agent = ContextAgent()
     try:
         gemini_client = create_gemini_client_from_settings(settings)
+        redis_state = create_redis_state_store_from_settings(settings)
         answer_agent = AnswerAgent(text_generator=gemini_client)
         document_summary_agent = DocumentSummaryAgent(text_generator=gemini_client)
         orchestrator = TaskOrchestrator(
@@ -51,6 +57,7 @@ async def run_worker() -> None:
             context_agent=context_agent,
             answer_agent=answer_agent,
             document_summary_agent=document_summary_agent,
+            redis_state=redis_state,
         )
         worker.set_message_handler(orchestrator.handle)
 
@@ -69,6 +76,11 @@ async def run_worker() -> None:
                 await gemini_client.aclose()
             except Exception:
                 logger.exception("Gemini client close failed")
+        if redis_state is not None:
+            try:
+                await redis_state.aclose()
+            except Exception:
+                logger.exception("Redis state close failed")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
