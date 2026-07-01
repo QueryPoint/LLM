@@ -25,11 +25,15 @@ from assistant_service.services.task_orchestrator import (
     STATUS_MESSAGES,
     TaskOrchestrator,
 )
+from assistant_service.services.gemini_client import GeminiRateLimitError
 
 
 USER_ID = "00000000-0000-0000-0000-000000000002"
 DOC_ID = "00000000-0000-0000-0000-000000000004"
 CHUNK_ID = "00000000-0000-0000-0000-000000000101"
+MAX_USER_PROMPT_CHARS = 4_000
+MAX_CHUNK_CHARS = 12_000
+MAX_CHUNKS_PER_REQUEST = 32
 
 
 class FakePublisher:
@@ -102,8 +106,9 @@ class FakeContextAgent:
 
 
 class FakeAnswerAgent:
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         self.calls: list[tuple[AssistantMode, str | None, ContextDecision]] = []
+        self._error = error
 
     async def answer(
         self,
@@ -113,6 +118,8 @@ class FakeAnswerAgent:
         context_decision: ContextDecision,
     ) -> str:
         self.calls.append((mode, user_prompt, context_decision))
+        if self._error is not None:
+            raise self._error
         return "Generated answer"
 
 
@@ -228,6 +235,9 @@ def test_prompt_publishes_think_statuses_then_response() -> None:
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
         redis_state=FakeRedisState(),
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
     )
 
     message = _prompt_message()
@@ -283,6 +293,9 @@ def test_answer_question_found_context_publishes_single_buffered_response() -> N
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
         redis_state=FakeRedisState(),
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -320,6 +333,9 @@ def test_answer_question_found_context_uses_cached_answer_without_agent() -> Non
         answer_agent=answer_agent,
         document_summary_agent=FakeDocumentSummaryAgent(),
         redis_state=redis_state,
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -338,6 +354,66 @@ def test_answer_question_found_context_uses_cached_answer_without_agent() -> Non
     assert redis_state.task_statuses[-1] == (UUID(USER_ID), "completed")
 
 
+def test_gemini_rate_limit_error_publishes_safe_response() -> None:
+    publisher = FakePublisher()
+    redis_state = FakeRedisState()
+    orchestrator = TaskOrchestrator(
+        publisher=publisher,
+        intent_agent=FakeIntentAgent(mode=AssistantMode.ANSWER_QUESTION),
+        context_agent=FakeContextAgent(chunks=(_chunk(),)),
+        answer_agent=FakeAnswerAgent(error=GeminiRateLimitError("rate limit")),
+        document_summary_agent=FakeDocumentSummaryAgent(),
+        redis_state=redis_state,
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message()))
+
+    response_events = [
+        event for event in publisher.events if event.type == OutgoingEventType.RESPONSE
+    ]
+    assert len(response_events) == 1
+    assert response_events[0].data == (
+        "Сервис временно перегружен. Подождите немного и повторите запрос."
+    )
+    assert redis_state.task_statuses[-1] == (UUID(USER_ID), "completed")
+
+
+def test_oversized_user_prompt_returns_response_without_agents() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(mode=AssistantMode.ANSWER_QUESTION)
+    context_agent = FakeContextAgent(chunks=(_chunk(),))
+    answer_agent = FakeAnswerAgent()
+    document_summary_agent = FakeDocumentSummaryAgent()
+    redis_state = FakeRedisState()
+    orchestrator = TaskOrchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        context_agent=context_agent,
+        answer_agent=answer_agent,
+        document_summary_agent=document_summary_agent,
+        redis_state=redis_state,
+        max_user_prompt_chars=3,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message()))
+
+    assert len(publisher.events) == 1
+    assert publisher.events[0].type == OutgoingEventType.RESPONSE
+    assert publisher.events[0].data == (
+        "Запрос слишком большой. Сократите его и попробуйте ещё раз."
+    )
+    assert intent_agent.calls == []
+    assert context_agent.calls == []
+    assert answer_agent.calls == []
+    assert document_summary_agent.calls == []
+    assert redis_state.task_statuses[-1] == (UUID(USER_ID), "completed")
+
+
 def test_summarize_document_found_context_uses_document_summary_agent() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent(mode=AssistantMode.SUMMARIZE_DOCUMENT)
@@ -351,6 +427,9 @@ def test_summarize_document_found_context_uses_document_summary_agent() -> None:
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
         redis_state=FakeRedisState(),
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -379,6 +458,9 @@ def test_delete_publishes_only_think_confirmation() -> None:
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
         redis_state=redis_state,
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
     )
 
     asyncio.run(orchestrator.handle(_delete_message()))
@@ -402,6 +484,9 @@ def test_handled_processing_error_publishes_safe_response() -> None:
         answer_agent=FakeAnswerAgent(),
         document_summary_agent=FakeDocumentSummaryAgent(),
         redis_state=FakeRedisState(),
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
     )
 
     asyncio.run(orchestrator.handle(_prompt_message()))
@@ -419,6 +504,9 @@ def test_safe_response_publish_failure_is_reraised() -> None:
         answer_agent=FakeAnswerAgent(),
         document_summary_agent=FakeDocumentSummaryAgent(),
         redis_state=FakeRedisState(),
+        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
     )
 
     with pytest.raises(RuntimeError):
