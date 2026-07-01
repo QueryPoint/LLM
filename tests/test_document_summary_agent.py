@@ -1,6 +1,8 @@
 import asyncio
 from uuid import UUID
 
+import pytest
+
 from assistant_service.agents.context_agent import ContextDecision
 from assistant_service.agents.document_summary_agent import (
     FINAL_SUMMARY_MAX_OUTPUT_TOKENS,
@@ -9,6 +11,7 @@ from assistant_service.agents.document_summary_agent import (
 )
 from assistant_service.core.enums import RetrievalStatus
 from assistant_service.messaging.contracts import RetrievedChunk
+from assistant_service.services.gemini_client import GeminiRequestLimitError
 
 DOCUMENT_ID = "00000000-0000-0000-0000-000000000004"
 CHUNK_ID_1 = "00000000-0000-0000-0000-000000000101"
@@ -64,7 +67,11 @@ def _context(chunks: tuple[RetrievedChunk, ...]) -> ContextDecision:
 
 def test_small_document_uses_single_direct_summary_call() -> None:
     generator = FakeTextGenerator()
-    agent = DocumentSummaryAgent(text_generator=generator)
+    agent = DocumentSummaryAgent(
+        text_generator=generator,
+        max_chunk_chars=12_000,
+        max_prompt_chars=16_000,
+    )
 
     response = asyncio.run(
         agent.summarize(
@@ -88,7 +95,11 @@ def test_small_document_uses_single_direct_summary_call() -> None:
 
 def test_large_document_uses_map_reduce_in_original_group_order() -> None:
     generator = FakeTextGenerator()
-    agent = DocumentSummaryAgent(text_generator=generator)
+    agent = DocumentSummaryAgent(
+        text_generator=generator,
+        max_chunk_chars=12_000,
+        max_prompt_chars=16_000,
+    )
     chunks = (
         _chunk(CHUNK_ID_1, "A" * 6_000),
         _chunk(CHUNK_ID_2, "B" * 6_000),
@@ -116,3 +127,22 @@ def test_large_document_uses_map_reduce_in_original_group_order() -> None:
     assert "Map summary 1" in str(generator.calls[3]["prompt"])
     assert "Map summary 2" in str(generator.calls[3]["prompt"])
     assert "Map summary 3" in str(generator.calls[3]["prompt"])
+
+
+def test_oversized_summary_chunk_raises_without_generator_call() -> None:
+    generator = FakeTextGenerator()
+    agent = DocumentSummaryAgent(
+        text_generator=generator,
+        max_chunk_chars=5,
+        max_prompt_chars=16_000,
+    )
+
+    with pytest.raises(GeminiRequestLimitError):
+        asyncio.run(
+            agent.summarize(
+                user_prompt=None,
+                context_decision=_context((_chunk(CHUNK_ID_1, "too long"),)),
+            )
+        )
+
+    assert generator.calls == []

@@ -22,6 +22,17 @@ CONTEXT_INSUFFICIENT_RESPONSE = (
 SUMMARY_REQUIRES_COMPLETE_DOCUMENT_RESPONSE = (
     "Для подготовки краткого изложения нужен полный текст выбранного документа."
 )
+REQUEST_TOO_LARGE_RESPONSE = "Запрос слишком большой. Сократите его и попробуйте ещё раз."
+CONTEXT_TOO_LARGE_RESPONSE = (
+    "Переданных материалов слишком много для безопасной обработки. "
+    "Уточните запрос или выберите другой документ."
+)
+GEMINI_RATE_LIMIT_RESPONSE = (
+    "Сервис временно перегружен. Подождите немного и повторите запрос."
+)
+GEMINI_UNAVAILABLE_RESPONSE = (
+    "Не удалось получить ответ от модели. Попробуйте повторить запрос позже."
+)
 
 
 def build_response_text(mode: AssistantMode, context_decision: ContextDecision) -> str:
@@ -52,6 +63,22 @@ def get_response_kind(mode: AssistantMode, context_decision: ContextDecision) ->
 
 def build_summary_requires_complete_document_response() -> str:
     return SUMMARY_REQUIRES_COMPLETE_DOCUMENT_RESPONSE
+
+
+def build_request_too_large_response() -> str:
+    return REQUEST_TOO_LARGE_RESPONSE
+
+
+def build_context_too_large_response() -> str:
+    return CONTEXT_TOO_LARGE_RESPONSE
+
+
+def build_gemini_rate_limit_response() -> str:
+    return GEMINI_RATE_LIMIT_RESPONSE
+
+
+def build_gemini_unavailable_response() -> str:
+    return GEMINI_UNAVAILABLE_RESPONSE
 
 
 def _build_document_search_response(context_decision: ContextDecision) -> str:

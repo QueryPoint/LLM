@@ -4,6 +4,7 @@ from typing import Protocol
 from assistant_service.agents.context_agent import ContextDecision
 from assistant_service.core.enums import RetrievalStatus
 from assistant_service.messaging.contracts import RetrievedChunk
+from assistant_service.services.gemini_client import GeminiRequestLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,21 @@ class TextGenerator(Protocol):
 
 
 class DocumentSummaryAgent:
-    def __init__(self, text_generator: TextGenerator) -> None:
+    def __init__(
+        self,
+        text_generator: TextGenerator,
+        *,
+        max_chunk_chars: int,
+        max_prompt_chars: int,
+    ) -> None:
+        if max_chunk_chars <= 0:
+            raise ValueError("max_chunk_chars must be positive")
+        if max_prompt_chars <= 0:
+            raise ValueError("max_prompt_chars must be positive")
+
         self._text_generator = text_generator
+        self._max_chunk_chars = max_chunk_chars
+        self._max_prompt_chars = max_prompt_chars
 
     async def summarize(
         self,
@@ -87,6 +101,7 @@ class DocumentSummaryAgent:
         context_decision: ContextDecision,
     ) -> str:
         self._validate_context(context_decision)
+        self._validate_chunk_sizes(context_decision.chunks)
         strategy = (
             "direct"
             if context_decision.total_chars <= DIRECT_SUMMARY_MAX_CHARS
@@ -131,12 +146,14 @@ class DocumentSummaryAgent:
         user_prompt: str | None,
         chunks: tuple[RetrievedChunk, ...],
     ) -> str:
+        prompt = self._build_document_prompt(
+            user_prompt=user_prompt,
+            chunks=chunks,
+        )
+        self._validate_prompt_size(DIRECT_SUMMARY_SYSTEM_INSTRUCTION, prompt)
         return await self._text_generator.generate_text(
             system_instruction=DIRECT_SUMMARY_SYSTEM_INSTRUCTION,
-            prompt=self._build_document_prompt(
-                user_prompt=user_prompt,
-                chunks=chunks,
-            ),
+            prompt=prompt,
             max_output_tokens=FINAL_SUMMARY_MAX_OUTPUT_TOKENS,
             temperature=SUMMARY_TEMPERATURE,
         )
@@ -151,18 +168,21 @@ class DocumentSummaryAgent:
             chunks=chunks,
             max_chars=MAP_BATCH_MAX_CHARS,
         )
-        map_summaries = [
-            await self._text_generator.generate_text(
-                system_instruction=MAP_SUMMARY_SYSTEM_INSTRUCTION,
-                prompt=self._build_document_prompt(
-                    user_prompt=user_prompt,
-                    chunks=chunk_group,
-                ),
-                max_output_tokens=MAP_MAX_OUTPUT_TOKENS,
-                temperature=SUMMARY_TEMPERATURE,
+        map_summaries: list[str] = []
+        for chunk_group in chunk_groups:
+            prompt = self._build_document_prompt(
+                user_prompt=user_prompt,
+                chunks=chunk_group,
             )
-            for chunk_group in chunk_groups
-        ]
+            self._validate_prompt_size(MAP_SUMMARY_SYSTEM_INSTRUCTION, prompt)
+            map_summaries.append(
+                await self._text_generator.generate_text(
+                    system_instruction=MAP_SUMMARY_SYSTEM_INSTRUCTION,
+                    prompt=prompt,
+                    max_output_tokens=MAP_MAX_OUTPUT_TOKENS,
+                    temperature=SUMMARY_TEMPERATURE,
+                )
+            )
         logger.info("Document map summary completed: groups=%s", len(chunk_groups))
 
         return await self._reduce_summaries(map_summaries)
@@ -172,9 +192,11 @@ class DocumentSummaryAgent:
 
         for round_index in range(MAX_REDUCE_ROUNDS + 1):
             if self._summaries_total_chars(current_summaries) <= REDUCE_MAX_INPUT_CHARS:
+                prompt = self._build_reduce_prompt(current_summaries)
+                self._validate_prompt_size(REDUCE_SUMMARY_SYSTEM_INSTRUCTION, prompt)
                 return await self._text_generator.generate_text(
                     system_instruction=REDUCE_SUMMARY_SYSTEM_INSTRUCTION,
-                    prompt=self._build_reduce_prompt(current_summaries),
+                    prompt=prompt,
                     max_output_tokens=FINAL_SUMMARY_MAX_OUTPUT_TOKENS,
                     temperature=SUMMARY_TEMPERATURE,
                 )
@@ -186,15 +208,18 @@ class DocumentSummaryAgent:
                 texts=current_summaries,
                 max_chars=REDUCE_MAX_INPUT_CHARS,
             )
-            current_summaries = [
-                await self._text_generator.generate_text(
-                    system_instruction=REDUCE_SUMMARY_SYSTEM_INSTRUCTION,
-                    prompt=self._build_reduce_prompt(summary_group),
-                    max_output_tokens=FINAL_SUMMARY_MAX_OUTPUT_TOKENS,
-                    temperature=SUMMARY_TEMPERATURE,
+            current_summaries = []
+            for summary_group in summary_groups:
+                prompt = self._build_reduce_prompt(summary_group)
+                self._validate_prompt_size(REDUCE_SUMMARY_SYSTEM_INSTRUCTION, prompt)
+                current_summaries.append(
+                    await self._text_generator.generate_text(
+                        system_instruction=REDUCE_SUMMARY_SYSTEM_INSTRUCTION,
+                        prompt=prompt,
+                        max_output_tokens=FINAL_SUMMARY_MAX_OUTPUT_TOKENS,
+                        temperature=SUMMARY_TEMPERATURE,
+                    )
                 )
-                for summary_group in summary_groups
-            ]
 
         raise ValueError("Document summary reduce input is too large")
 
@@ -284,3 +309,15 @@ class DocumentSummaryAgent:
     @staticmethod
     def _summaries_total_chars(summaries: list[str]) -> int:
         return sum(len(summary) for summary in summaries)
+
+    def _validate_chunk_sizes(self, chunks: tuple[RetrievedChunk, ...]) -> None:
+        if any(len(chunk.text) > self._max_chunk_chars for chunk in chunks):
+            raise GeminiRequestLimitError(
+                "Gemini context chunk exceeds configured character limit."
+            )
+
+    def _validate_prompt_size(self, system_instruction: str, prompt: str) -> None:
+        if len(system_instruction) + len(prompt) > self._max_prompt_chars:
+            raise GeminiRequestLimitError(
+                "Gemini prompt exceeds configured character limit."
+            )

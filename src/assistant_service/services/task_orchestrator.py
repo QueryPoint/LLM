@@ -22,6 +22,10 @@ from assistant_service.messaging.contracts import (
     ThinkEvent,
 )
 from assistant_service.services.response_builder import (
+    build_context_too_large_response,
+    build_gemini_rate_limit_response,
+    build_gemini_unavailable_response,
+    build_request_too_large_response,
     build_summary_requires_complete_document_response,
     build_response_text,
     get_response_kind,
@@ -30,6 +34,12 @@ from assistant_service.services.cache_keys import (
     build_answer_cache_key,
     build_answer_lock_key,
     build_intent_cache_key,
+)
+from assistant_service.services.gemini_client import (
+    GeminiPermanentError,
+    GeminiRateLimitError,
+    GeminiRequestLimitError,
+    GeminiTransientError,
 )
 from assistant_service.services.redis_state import RedisStateStore
 
@@ -64,13 +74,26 @@ class TaskOrchestrator:
         answer_agent: AnswerAgent,
         document_summary_agent: DocumentSummaryAgent,
         redis_state: RedisStateStore,
+        max_user_prompt_chars: int,
+        max_chunk_chars: int,
+        max_chunks_per_request: int,
     ) -> None:
+        if max_user_prompt_chars <= 0:
+            raise ValueError("max_user_prompt_chars must be positive")
+        if max_chunk_chars <= 0:
+            raise ValueError("max_chunk_chars must be positive")
+        if max_chunks_per_request <= 0:
+            raise ValueError("max_chunks_per_request must be positive")
+
         self._publisher = publisher
         self._intent_agent = intent_agent
         self._context_agent = context_agent
         self._answer_agent = answer_agent
         self._document_summary_agent = document_summary_agent
         self._redis_state = redis_state
+        self._max_user_prompt_chars = max_user_prompt_chars
+        self._max_chunk_chars = max_chunk_chars
+        self._max_chunks_per_request = max_chunks_per_request
 
     async def handle(self, message: IncomingMessage) -> None:
         try:
@@ -111,6 +134,18 @@ class TaskOrchestrator:
         raise ValueError(f"Unsupported incoming message type: {message.type}")
 
     async def _handle_prompt(self, message: PromptRequestMessage) -> None:
+        if self._is_user_prompt_too_large(message.prompt):
+            logger.info(
+                "Prompt rejected by local limit: user_id=%s prompt_chars=%s",
+                message.user_id,
+                len(message.prompt) if message.prompt is not None else 0,
+            )
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_request_too_large_response(),
+            )
+            return
+
         logger.info(
             "Task orchestrator received prompt: user_id=%s",
             message.user_id,
@@ -148,6 +183,23 @@ class TaskOrchestrator:
             user_id=message.user_id,
             retrieval_status=context_decision.status,
         )
+
+        if self._context_exceeds_generation_limits(
+            mode=intent_decision.mode,
+            context_decision=context_decision,
+        ):
+            logger.info(
+                "Context rejected by local limit: user_id=%s mode=%s chunks=%s",
+                message.user_id,
+                intent_decision.mode.value,
+                len(context_decision.chunks),
+            )
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_context_too_large_response(),
+            )
+            return
+
         await self._publish_prompt_status(message.user_id, LLMStatus.GENERATING)
 
         if self._should_use_summary_incomplete_fallback(
@@ -191,7 +243,7 @@ class TaskOrchestrator:
                 context_decision.status.value,
                 len(context_decision.chunks),
             )
-            response_text = await self._get_or_generate_answer(
+            response_text = await self._get_or_generate_answer_safely(
                 user_id=message.user_id,
                 mode=intent_decision.mode,
                 user_prompt=message.prompt,
@@ -210,7 +262,7 @@ class TaskOrchestrator:
                 context_decision.status.value,
                 len(context_decision.chunks),
             )
-            response_text = await self._get_or_generate_answer(
+            response_text = await self._get_or_generate_answer_safely(
                 user_id=message.user_id,
                 mode=intent_decision.mode,
                 user_prompt=message.prompt,
@@ -292,6 +344,47 @@ class TaskOrchestrator:
             if lock is not None:
                 await self._redis_state.release_answer_lock(lock)
 
+    async def _get_or_generate_answer_safely(
+        self,
+        *,
+        user_id: UUID,
+        mode: AssistantMode,
+        user_prompt: str | None,
+        context_decision: ContextDecision,
+        generator: Callable[[], Awaitable[str]],
+    ) -> str:
+        try:
+            return await self._get_or_generate_answer(
+                user_id=user_id,
+                mode=mode,
+                user_prompt=user_prompt,
+                context_decision=context_decision,
+                generator=generator,
+            )
+        except GeminiRequestLimitError:
+            logger.warning(
+                "Gemini request rejected by limit: user_id=%s mode=%s",
+                user_id,
+                mode.value,
+            )
+            return build_context_too_large_response()
+        except GeminiRateLimitError:
+            logger.warning(
+                "Gemini rate limit fallback selected: user_id=%s mode=%s",
+                user_id,
+                mode.value,
+            )
+            return build_gemini_rate_limit_response()
+        except (GeminiTransientError, GeminiPermanentError) as exc:
+            logger.warning(
+                "Gemini unavailable fallback selected: user_id=%s mode=%s "
+                "error_type=%s",
+                user_id,
+                mode.value,
+                type(exc).__name__,
+            )
+            return build_gemini_unavailable_response()
+
     async def _publish_think(
         self,
         user_id: UUID,
@@ -366,6 +459,31 @@ class TaskOrchestrator:
         return (
             mode == AssistantMode.SUMMARIZE_DOCUMENT
             and retrieval_status == RetrievalStatus.INSUFFICIENT
+        )
+
+    def _is_user_prompt_too_large(self, prompt: str | None) -> bool:
+        return prompt is not None and len(prompt) > self._max_user_prompt_chars
+
+    def _context_exceeds_generation_limits(
+        self,
+        *,
+        mode: AssistantMode,
+        context_decision: ContextDecision,
+    ) -> bool:
+        if context_decision.status != RetrievalStatus.FOUND:
+            return False
+        if mode == AssistantMode.DOCUMENT_SEARCH:
+            return False
+
+        if any(
+            len(chunk.text) > self._max_chunk_chars
+            for chunk in context_decision.chunks
+        ):
+            return True
+
+        return (
+            mode != AssistantMode.SUMMARIZE_DOCUMENT
+            and len(context_decision.chunks) > self._max_chunks_per_request
         )
 
     async def _publish_response(

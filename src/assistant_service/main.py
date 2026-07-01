@@ -41,7 +41,10 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
 
 
 async def run_worker() -> None:
-    worker = RabbitMQWorker(settings=settings)
+    worker = RabbitMQWorker(
+        settings=settings,
+        max_processing_attempts=settings.rabbitmq_max_processing_attempts,
+    )
     gemini_client: GeminiClient | None = None
     redis_state: RedisStateStore | None = None
     intent_agent = IntentAgent()
@@ -50,7 +53,11 @@ async def run_worker() -> None:
         gemini_client = create_gemini_client_from_settings(settings)
         redis_state = create_redis_state_store_from_settings(settings)
         answer_agent = AnswerAgent(text_generator=gemini_client)
-        document_summary_agent = DocumentSummaryAgent(text_generator=gemini_client)
+        document_summary_agent = DocumentSummaryAgent(
+            text_generator=gemini_client,
+            max_chunk_chars=settings.gemini_max_chunk_chars,
+            max_prompt_chars=settings.gemini_max_prompt_chars,
+        )
         orchestrator = TaskOrchestrator(
             publisher=worker,
             intent_agent=intent_agent,
@@ -58,6 +65,9 @@ async def run_worker() -> None:
             answer_agent=answer_agent,
             document_summary_agent=document_summary_agent,
             redis_state=redis_state,
+            max_user_prompt_chars=settings.gemini_max_user_prompt_chars,
+            max_chunk_chars=settings.gemini_max_chunk_chars,
+            max_chunks_per_request=settings.gemini_max_chunks_per_request,
         )
         worker.set_message_handler(orchestrator.handle)
 
