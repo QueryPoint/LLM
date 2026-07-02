@@ -68,6 +68,7 @@ async def run_worker() -> None:
             max_user_prompt_chars=settings.gemini_max_user_prompt_chars,
             max_chunk_chars=settings.gemini_max_chunk_chars,
             max_chunks_per_request=settings.gemini_max_chunks_per_request,
+            max_prompt_chars=settings.gemini_max_prompt_chars,
         )
         worker.set_message_handler(orchestrator.handle)
 
