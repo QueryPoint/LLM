@@ -37,6 +37,11 @@ MATERIALS_NOT_FOUND_RESPONSE = (
     "Не удалось найти материалы для подготовки ответа. "
     "Попробуйте уточнить запрос или выбрать документ."
 )
+UNSUPPORTED_REQUEST_RESPONSE = (
+    "Я не могу выполнить этот запрос. Ассистент помогает работать с материалами "
+    "университета: отвечает на вопросы по базе знаний, объясняет темы, ищет "
+    "документы и готовит краткие изложения."
+)
 
 
 def build_response_text(mode: AssistantMode, context_decision: ContextDecision) -> str:
@@ -87,6 +92,10 @@ def build_gemini_unavailable_response() -> str:
 
 def build_materials_not_found_response() -> str:
     return MATERIALS_NOT_FOUND_RESPONSE
+
+
+def build_unsupported_request_response() -> str:
+    return UNSUPPORTED_REQUEST_RESPONSE
 
 
 def _build_document_search_response(context_decision: ContextDecision) -> str:
