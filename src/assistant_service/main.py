@@ -47,11 +47,11 @@ async def run_worker() -> None:
     )
     gemini_client: GeminiClient | None = None
     redis_state: RedisStateStore | None = None
-    intent_agent = IntentAgent()
     context_agent = ContextAgent()
     try:
         gemini_client = create_gemini_client_from_settings(settings)
         redis_state = create_redis_state_store_from_settings(settings)
+        intent_agent = IntentAgent(text_generator=gemini_client)
         answer_agent = AnswerAgent(text_generator=gemini_client)
         document_summary_agent = DocumentSummaryAgent(
             text_generator=gemini_client,
