@@ -33,6 +33,10 @@ GEMINI_RATE_LIMIT_RESPONSE = (
 GEMINI_UNAVAILABLE_RESPONSE = (
     "Не удалось получить ответ от модели. Попробуйте повторить запрос позже."
 )
+MATERIALS_NOT_FOUND_RESPONSE = (
+    "Не удалось найти материалы для подготовки ответа. "
+    "Попробуйте уточнить запрос или выбрать документ."
+)
 
 
 def build_response_text(mode: AssistantMode, context_decision: ContextDecision) -> str:
@@ -79,6 +83,10 @@ def build_gemini_rate_limit_response() -> str:
 
 def build_gemini_unavailable_response() -> str:
     return GEMINI_UNAVAILABLE_RESPONSE
+
+
+def build_materials_not_found_response() -> str:
+    return MATERIALS_NOT_FOUND_RESPONSE
 
 
 def _build_document_search_response(context_decision: ContextDecision) -> str:
