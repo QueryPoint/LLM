@@ -5,7 +5,7 @@ import pytest
 
 from assistant_service.agents.answer_agent import AnswerAgent
 from assistant_service.agents.context_agent import ContextDecision
-from assistant_service.agents.intent_agent import IntentDecision
+from assistant_service.agents.intent_agent import IntentDecision, IntentTaskType
 from assistant_service.core.enums import (
     AssistantMode,
     OutgoingEventType,
@@ -86,12 +86,18 @@ class FakePublisher:
 
 
 class FakeIntentAgent:
-    def detect(
+    async def detect(
         self,
         prompt: str,
         uid: str | None,
     ) -> IntentDecision:
-        return IntentDecision(mode=AssistantMode.ANSWER_QUESTION, source="rule_based")
+        return IntentDecision(
+            task_type=IntentTaskType.ANSWER_QUESTION,
+            requires_retrieval=True,
+            requires_full_document=False,
+            keywords=["нормализация"],
+            source="rule_based",
+        )
 
 
 class FakeContextAgent:
