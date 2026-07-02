@@ -4,7 +4,11 @@ from typing import Protocol
 from assistant_service.agents.answer_agent import AnswerAgent
 from assistant_service.agents.context_agent import ContextAgent
 from assistant_service.agents.document_summary_agent import DocumentSummaryAgent
-from assistant_service.agents.intent_agent import IntentAgent, IntentDecision
+from assistant_service.agents.intent_agent import (
+    IntentAgent,
+    IntentDecision,
+    IntentTaskType,
+)
 from assistant_service.core.enums import LLMStatus, OutgoingEventType
 from assistant_service.messaging.contracts import (
     DeleteRequestMessage,
@@ -14,7 +18,6 @@ from assistant_service.messaging.contracts import (
     ResponseEvent,
     ThinkEvent,
 )
-from assistant_service.services.cache_keys import build_intent_cache_key
 from assistant_service.services.prompt_budget import (
     calculate_prompt_budget_warning,
     prompt_budget_exceeded,
@@ -23,6 +26,7 @@ from assistant_service.services.response_builder import (
     build_context_too_large_response,
     build_materials_not_found_response,
     build_request_too_large_response,
+    build_unsupported_request_response,
 )
 from assistant_service.services.redis_state import RedisStateStore
 
@@ -156,13 +160,21 @@ class TaskOrchestrator:
 
         intent_decision = await self._detect_intent(message)
         logger.info(
-            "Intent detected without retrieval: user_id=%s selected_mode=%s "
+            "Intent detected without retrieval: user_id=%s task_type=%s "
             "selection_source=%s has_uid=%s",
             message.user_id,
-            intent_decision.mode.value,
+            intent_decision.task_type.value,
             intent_decision.source,
             message.uid is not None,
         )
+        if intent_decision.task_type == IntentTaskType.UNSUPPORTED:
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_unsupported_request_response(),
+                warning=warning,
+            )
+            return
+
         await self._redis_state.set_task_status(
             user_id=message.user_id,
             status="not_found",
@@ -182,17 +194,7 @@ class TaskOrchestrator:
         await self._publish_think(user_id=message.user_id, data=DELETE_THINK_TEXT)
 
     async def _detect_intent(self, message: PromptRequestMessage) -> IntentDecision:
-        intent_cache_key = build_intent_cache_key(
-            prompt=message.prompt,
-            uid=message.uid,
-        )
-        cached_mode = await self._redis_state.get_intent_mode(intent_cache_key)
-        if cached_mode is not None:
-            return IntentDecision(mode=cached_mode, source="rule_based")
-
-        decision = self._intent_agent.detect(prompt=message.prompt, uid=message.uid)
-        await self._redis_state.set_intent_mode(intent_cache_key, decision.mode)
-        return decision
+        return await self._intent_agent.detect(prompt=message.prompt, uid=message.uid)
 
     async def _publish_think(
         self,
