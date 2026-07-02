@@ -27,6 +27,7 @@ CHUNK_ID = "00000000-0000-0000-0000-000000000004"
 MAX_USER_PROMPT_CHARS = 4_000
 MAX_CHUNK_CHARS = 12_000
 MAX_CHUNKS_PER_REQUEST = 32
+MAX_PROMPT_CHARS = 16_000
 
 
 class FakeTextGenerator:
@@ -87,9 +88,8 @@ class FakePublisher:
 class FakeIntentAgent:
     def detect(
         self,
-        prompt: str | None,
-        document_id: UUID | None,
-        requested_mode: AssistantMode | None,
+        prompt: str,
+        uid: str | None,
     ) -> IntentDecision:
         return IntentDecision(mode=AssistantMode.ANSWER_QUESTION, source="rule_based")
 
@@ -150,10 +150,10 @@ class FakeRedisState:
     async def set_intent_mode(self, key: str, mode: AssistantMode) -> None:
         return None
 
-    async def set_task_status(self, *, user_id: UUID, status: str) -> None:
+    async def set_task_status(self, *, user_id: str, status: str) -> None:
         return None
 
-    async def clear_user_state(self, *, user_id: UUID) -> None:
+    async def clear_user_state(self, *, user_id: str) -> None:
         return None
 
 
@@ -188,7 +188,7 @@ def _prompt_message() -> IncomingMessage:
             "type": "prompt",
             "user_id": USER_ID,
             "prompt": "Что такое нормализация?",
-            "doc": DOCUMENT_ID,
+            "uid": DOCUMENT_ID,
         }
     )
 
@@ -311,7 +311,7 @@ def test_invalid_generation_paths_raise_without_calling_generator() -> None:
     assert generator.stream_text_calls == []
 
 
-def test_orchestrator_uses_answer_agent_for_answer_question_with_found_context() -> None:
+def test_orchestrator_does_not_use_answer_agent_without_retrieval() -> None:
     publisher = FakePublisher()
     answer_agent = FakeAnswerAgent()
     orchestrator = TaskOrchestrator(
@@ -324,13 +324,15 @@ def test_orchestrator_uses_answer_agent_for_answer_question_with_found_context()
         max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
         max_chunk_chars=MAX_CHUNK_CHARS,
         max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
+        max_prompt_chars=MAX_PROMPT_CHARS,
     )
 
     message = _prompt_message()
     asyncio.run(orchestrator.handle(message))
 
-    assert len(answer_agent.calls) == 1
-    assert answer_agent.calls[0][0] == AssistantMode.ANSWER_QUESTION
-    assert answer_agent.calls[0][1] == "Что такое нормализация?"
+    assert answer_agent.calls == []
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
-    assert publisher.events[-1].data == "Ответ AnswerAgent"
+    assert publisher.events[-1].data == (
+        "Не удалось найти материалы для подготовки ответа. "
+        "Попробуйте уточнить запрос или выбрать документ."
+    )
