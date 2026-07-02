@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from assistant_service.agents.intent_agent import IntentDecision
-from assistant_service.core.enums import AssistantMode, OutgoingEventType
+from assistant_service.agents.intent_agent import IntentDecision, IntentTaskType
+from assistant_service.core.enums import OutgoingEventType
 from assistant_service.messaging.contracts import (
     IncomingMessage,
     OutgoingEvent,
@@ -15,6 +15,7 @@ from assistant_service.services.response_builder import (
     build_context_too_large_response,
     build_materials_not_found_response,
     build_request_too_large_response,
+    build_unsupported_request_response,
 )
 from assistant_service.services.task_orchestrator import (
     DETERMINE_INTENT_TEXT,
@@ -51,16 +52,24 @@ class FakePublisher:
 
 
 class FakeIntentAgent:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(
+        self,
+        fail: bool = False,
+        task_type: IntentTaskType = IntentTaskType.EXPLAIN_TOPIC,
+    ) -> None:
         self.calls: list[tuple[str, str | None]] = []
         self._fail = fail
+        self._task_type = task_type
 
-    def detect(self, prompt: str, uid: str | None) -> IntentDecision:
+    async def detect(self, prompt: str, uid: str | None) -> IntentDecision:
         self.calls.append((prompt, uid))
         if self._fail:
             raise RuntimeError("intent detection failed")
         return IntentDecision(
-            mode=AssistantMode.EXPLAIN_TOPIC,
+            task_type=self._task_type,
+            requires_retrieval=self._task_type != IntentTaskType.UNSUPPORTED,
+            requires_full_document=self._task_type == IntentTaskType.SUMMARIZE_DOCUMENT,
+            keywords=[] if self._task_type == IntentTaskType.UNSUPPORTED else ["sql"],
             source="rule_based",
         )
 
@@ -93,19 +102,9 @@ class FakeDocumentSummaryAgent:
 
 
 class FakeRedisState:
-    def __init__(self, cached_mode: AssistantMode | None = None) -> None:
-        self.cached_mode = cached_mode
-        self.intent_get_keys: list[str] = []
-        self.intent_set_calls: list[tuple[str, AssistantMode]] = []
+    def __init__(self) -> None:
         self.task_statuses: list[tuple[str, str]] = []
         self.clear_user_state_calls: list[str] = []
-
-    async def get_intent_mode(self, key: str) -> AssistantMode | None:
-        self.intent_get_keys.append(key)
-        return self.cached_mode
-
-    async def set_intent_mode(self, key: str, mode: AssistantMode) -> None:
-        self.intent_set_calls.append((key, mode))
 
     async def set_task_status(self, *, user_id: str, status: str) -> None:
         self.task_statuses.append((user_id, status))
@@ -211,6 +210,26 @@ def test_legacy_mode_and_context_are_not_required_for_pipeline() -> None:
     ]
     assert len(response_events) == 1
     assert response_events[0].data == build_materials_not_found_response()
+
+
+def test_unsupported_intent_returns_deterministic_response_without_agents() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(task_type=IntentTaskType.UNSUPPORTED)
+    answer_agent = FakeAnswerAgent()
+    document_summary_agent = FakeDocumentSummaryAgent()
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        answer_agent=answer_agent,
+        document_summary_agent=document_summary_agent,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message(prompt="Создай сайт")))
+
+    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
+    assert publisher.events[-1].data == build_unsupported_request_response()
+    assert answer_agent.calls == []
+    assert document_summary_agent.calls == []
 
 
 def test_prompt_budget_boundary_returns_context_too_large_without_agents() -> None:
