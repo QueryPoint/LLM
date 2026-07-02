@@ -132,7 +132,7 @@ class RedisStateStore:
         except RedisError as exc:
             self._log_redis_error("set_intent_mode", exc)
 
-    async def set_task_status(self, *, user_id: UUID, status: str) -> None:
+    async def set_task_status(self, *, user_id: str | UUID, status: str) -> None:
         if status not in ALLOWED_TASK_STATUSES:
             raise ValueError(f"Unsupported task status: {status}")
 
@@ -145,7 +145,7 @@ class RedisStateStore:
         except RedisError as exc:
             self._log_redis_error("set_task_status", exc)
 
-    async def get_task_status(self, *, user_id: UUID) -> str | None:
+    async def get_task_status(self, *, user_id: str | UUID) -> str | None:
         try:
             raw_value = await self._client.get(build_task_status_key(user_id=user_id))
             if raw_value is None:
@@ -162,13 +162,13 @@ class RedisStateStore:
             self._log_redis_error("get_task_status", exc)
             return None
 
-    async def clear_task_status(self, *, user_id: UUID) -> None:
+    async def clear_task_status(self, *, user_id: str | UUID) -> None:
         await self._delete_keys(
             "clear_task_status",
             build_task_status_key(user_id=user_id),
         )
 
-    async def get_session_summary(self, *, user_id: UUID) -> str | None:
+    async def get_session_summary(self, *, user_id: str | UUID) -> str | None:
         try:
             raw_value = await self._client.get(build_session_summary_key(user_id=user_id))
             if raw_value is None:
@@ -186,7 +186,7 @@ class RedisStateStore:
             self._log_redis_error("get_session_summary", exc)
             return None
 
-    async def set_session_summary(self, *, user_id: UUID, summary: str) -> None:
+    async def set_session_summary(self, *, user_id: str | UUID, summary: str) -> None:
         stripped_summary = summary.strip()
         if stripped_summary == "":
             return
@@ -200,13 +200,13 @@ class RedisStateStore:
         except RedisError as exc:
             self._log_redis_error("set_session_summary", exc)
 
-    async def clear_session_summary(self, *, user_id: UUID) -> None:
+    async def clear_session_summary(self, *, user_id: str | UUID) -> None:
         await self._delete_keys(
             "clear_session_summary",
             build_session_summary_key(user_id=user_id),
         )
 
-    async def clear_user_state(self, *, user_id: UUID) -> None:
+    async def clear_user_state(self, *, user_id: str | UUID) -> None:
         await self._delete_keys(
             "clear_user_state",
             build_task_status_key(user_id=user_id),

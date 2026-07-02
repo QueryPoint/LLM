@@ -1,18 +1,11 @@
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Protocol
-from uuid import UUID
 
 from assistant_service.agents.answer_agent import AnswerAgent
-from assistant_service.agents.context_agent import ContextAgent, ContextDecision
+from assistant_service.agents.context_agent import ContextAgent
 from assistant_service.agents.document_summary_agent import DocumentSummaryAgent
 from assistant_service.agents.intent_agent import IntentAgent, IntentDecision
-from assistant_service.core.enums import (
-    AssistantMode,
-    LLMStatus,
-    OutgoingEventType,
-    RetrievalStatus,
-)
+from assistant_service.core.enums import LLMStatus, OutgoingEventType
 from assistant_service.messaging.contracts import (
     DeleteRequestMessage,
     IncomingMessage,
@@ -21,43 +14,24 @@ from assistant_service.messaging.contracts import (
     ResponseEvent,
     ThinkEvent,
 )
+from assistant_service.services.cache_keys import build_intent_cache_key
+from assistant_service.services.prompt_budget import (
+    calculate_prompt_budget_warning,
+    prompt_budget_exceeded,
+)
 from assistant_service.services.response_builder import (
     build_context_too_large_response,
-    build_gemini_rate_limit_response,
-    build_gemini_unavailable_response,
+    build_materials_not_found_response,
     build_request_too_large_response,
-    build_summary_requires_complete_document_response,
-    build_response_text,
-    get_response_kind,
-)
-from assistant_service.services.cache_keys import (
-    build_answer_cache_key,
-    build_answer_lock_key,
-    build_intent_cache_key,
-)
-from assistant_service.services.gemini_client import (
-    GeminiPermanentError,
-    GeminiRateLimitError,
-    GeminiRequestLimitError,
-    GeminiTransientError,
 )
 from assistant_service.services.redis_state import RedisStateStore
 
 logger = logging.getLogger(__name__)
 
-STATUS_MESSAGES = {
-    LLMStatus.QUEUED: "Запрос добавлен в очередь...",
-    LLMStatus.PROCESSING: "Приняли запрос в обработку...",
-    LLMStatus.THINKING: "Анализируем запрос...",
-    LLMStatus.SEARCHING: "Ищем релевантные материалы...",
-    LLMStatus.FOUND: "Нашли подходящие материалы...",
-    LLMStatus.GENERATING: "Готовим дальнейшую обработку...",
-}
-INTENT_DETECTED_TEXT = "Определили тип запроса..."
-CONTEXT_NOT_FOUND_TEXT = "Подходящие материалы не найдены."
-CONTEXT_INSUFFICIENT_TEXT = "Найденных материалов недостаточно для подготовки ответа."
+DETERMINE_INTENT_TEXT = "Определяю тип запроса..."
 DELETE_THINK_TEXT = "История диалога очищена."
 SAFE_ERROR_RESPONSE = "Не удалось обработать запрос. Попробуйте ещё раз."
+NO_RETRIEVAL_PROMPT_MARKUP = "ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n\nКОНТЕКСТ:\n"
 
 
 class EventPublisher(Protocol):
@@ -77,6 +51,7 @@ class TaskOrchestrator:
         max_user_prompt_chars: int,
         max_chunk_chars: int,
         max_chunks_per_request: int,
+        max_prompt_chars: int,
     ) -> None:
         if max_user_prompt_chars <= 0:
             raise ValueError("max_user_prompt_chars must be positive")
@@ -84,6 +59,8 @@ class TaskOrchestrator:
             raise ValueError("max_chunk_chars must be positive")
         if max_chunks_per_request <= 0:
             raise ValueError("max_chunks_per_request must be positive")
+        if max_prompt_chars <= 0:
+            raise ValueError("max_prompt_chars must be positive")
 
         self._publisher = publisher
         self._intent_agent = intent_agent
@@ -94,6 +71,7 @@ class TaskOrchestrator:
         self._max_user_prompt_chars = max_user_prompt_chars
         self._max_chunk_chars = max_chunk_chars
         self._max_chunks_per_request = max_chunks_per_request
+        self._max_prompt_chars = max_prompt_chars
 
     async def handle(self, message: IncomingMessage) -> None:
         try:
@@ -134,147 +112,66 @@ class TaskOrchestrator:
         raise ValueError(f"Unsupported incoming message type: {message.type}")
 
     async def _handle_prompt(self, message: PromptRequestMessage) -> None:
+        warning = self._calculate_warning(user_prompt=message.prompt)
         if self._is_user_prompt_too_large(message.prompt):
             logger.info(
                 "Prompt rejected by local limit: user_id=%s prompt_chars=%s",
                 message.user_id,
-                len(message.prompt) if message.prompt is not None else 0,
+                len(message.prompt),
             )
             await self._publish_response(
                 user_id=message.user_id,
                 data=build_request_too_large_response(),
+                warning=warning,
             )
             return
 
-        logger.info(
-            "Task orchestrator received prompt: user_id=%s",
-            message.user_id,
-        )
-        await self._publish_prompt_status(message.user_id, LLMStatus.PROCESSING)
-        await self._publish_prompt_status(message.user_id, LLMStatus.THINKING)
-
-        intent_decision = await self._detect_intent(message)
-        logger.info(
-            "Intent detected: user_id=%s selected_mode=%s "
-            "selection_source=%s has_document=%s",
-            message.user_id,
-            intent_decision.mode.value,
-            intent_decision.source,
-            message.doc is not None,
-        )
-
-        await self._publish_think(user_id=message.user_id, data=INTENT_DETECTED_TEXT)
-        await self._publish_prompt_status(message.user_id, LLMStatus.SEARCHING)
-
-        context_decision = self._context_agent.prepare(
-            message.document_context,
-            mode=intent_decision.mode,
-        )
-        logger.info(
-            "Context prepared: user_id=%s retrieval_status=%s selected_chunks=%s "
-            "total_chars=%s sources=%s",
-            message.user_id,
-            context_decision.status.value,
-            len(context_decision.chunks),
-            context_decision.total_chars,
-            len(context_decision.sources),
-        )
-        await self._publish_context_status(
-            user_id=message.user_id,
-            retrieval_status=context_decision.status,
-        )
-
-        if self._context_exceeds_generation_limits(
-            mode=intent_decision.mode,
-            context_decision=context_decision,
-        ):
+        if self._prompt_budget_exceeded(user_prompt=message.prompt):
             logger.info(
-                "Context rejected by local limit: user_id=%s mode=%s chunks=%s",
+                "Prompt rejected by budget limit: user_id=%s warning=%s",
                 message.user_id,
-                intent_decision.mode.value,
-                len(context_decision.chunks),
+                warning,
             )
             await self._publish_response(
                 user_id=message.user_id,
                 data=build_context_too_large_response(),
+                warning=warning,
             )
             return
 
-        await self._publish_prompt_status(message.user_id, LLMStatus.GENERATING)
+        logger.info(
+            "Task orchestrator received prompt: user_id=%s has_uid=%s",
+            message.user_id,
+            message.uid is not None,
+        )
+        await self._redis_state.set_task_status(
+            user_id=message.user_id,
+            status=LLMStatus.PROCESSING.value.lower(),
+        )
+        await self._publish_think(
+            user_id=message.user_id,
+            data=DETERMINE_INTENT_TEXT,
+            status=LLMStatus.THINKING,
+        )
 
-        if self._should_use_summary_incomplete_fallback(
-            mode=intent_decision.mode,
-            retrieval_status=context_decision.status,
-        ):
-            response_text = build_summary_requires_complete_document_response()
-            logger.info(
-                "Complete document summary required: user_id=%s mode=%s "
-                "retrieval_status=%s",
-                message.user_id,
-                intent_decision.mode.value,
-                context_decision.status.value,
-            )
-        elif self._should_use_response_builder(
-            mode=intent_decision.mode,
-            retrieval_status=context_decision.status,
-        ):
-            response_text = build_response_text(
-                mode=intent_decision.mode,
-                context_decision=context_decision,
-            )
-            response_kind = get_response_kind(
-                mode=intent_decision.mode,
-                context_decision=context_decision,
-            )
-            logger.info(
-                "Response selected without LLM: user_id=%s mode=%s "
-                "retrieval_status=%s response_kind=%s",
-                message.user_id,
-                intent_decision.mode.value,
-                context_decision.status.value,
-                response_kind,
-            )
-        elif intent_decision.mode == AssistantMode.SUMMARIZE_DOCUMENT:
-            logger.info(
-                "Document summary selected: user_id=%s mode=%s "
-                "retrieval_status=%s selected_chunks=%s",
-                message.user_id,
-                intent_decision.mode.value,
-                context_decision.status.value,
-                len(context_decision.chunks),
-            )
-            response_text = await self._get_or_generate_answer_safely(
-                user_id=message.user_id,
-                mode=intent_decision.mode,
-                user_prompt=message.prompt,
-                context_decision=context_decision,
-                generator=lambda: self._document_summary_agent.summarize(
-                    user_prompt=message.prompt,
-                    context_decision=context_decision,
-                ),
-            )
-        else:
-            logger.info(
-                "Answer generation selected: user_id=%s mode=%s "
-                "retrieval_status=%s selected_chunks=%s",
-                message.user_id,
-                intent_decision.mode.value,
-                context_decision.status.value,
-                len(context_decision.chunks),
-            )
-            response_text = await self._get_or_generate_answer_safely(
-                user_id=message.user_id,
-                mode=intent_decision.mode,
-                user_prompt=message.prompt,
-                context_decision=context_decision,
-                generator=lambda: self._answer_agent.answer(
-                    mode=intent_decision.mode,
-                    user_prompt=message.prompt,
-                    context_decision=context_decision,
-                ),
-            )
-
-        await self._publish_response(user_id=message.user_id, data=response_text)
+        intent_decision = await self._detect_intent(message)
+        logger.info(
+            "Intent detected without retrieval: user_id=%s selected_mode=%s "
+            "selection_source=%s has_uid=%s",
+            message.user_id,
+            intent_decision.mode.value,
+            intent_decision.source,
+            message.uid is not None,
+        )
+        await self._redis_state.set_task_status(
+            user_id=message.user_id,
+            status="not_found",
+        )
+        await self._publish_response(
+            user_id=message.user_id,
+            data=build_materials_not_found_response(),
+            warning=warning,
+        )
 
     async def _handle_delete(self, message: DeleteRequestMessage) -> None:
         logger.info(
@@ -285,109 +182,21 @@ class TaskOrchestrator:
         await self._publish_think(user_id=message.user_id, data=DELETE_THINK_TEXT)
 
     async def _detect_intent(self, message: PromptRequestMessage) -> IntentDecision:
-        if message.mode is not None:
-            return self._intent_agent.detect(
-                prompt=message.prompt,
-                document_id=message.doc,
-                requested_mode=message.mode,
-            )
-
         intent_cache_key = build_intent_cache_key(
             prompt=message.prompt,
-            document_id=message.doc,
-            requested_mode=None,
+            uid=message.uid,
         )
         cached_mode = await self._redis_state.get_intent_mode(intent_cache_key)
         if cached_mode is not None:
             return IntentDecision(mode=cached_mode, source="rule_based")
 
-        decision = self._intent_agent.detect(
-            prompt=message.prompt,
-            document_id=message.doc,
-            requested_mode=None,
-        )
+        decision = self._intent_agent.detect(prompt=message.prompt, uid=message.uid)
         await self._redis_state.set_intent_mode(intent_cache_key, decision.mode)
         return decision
 
-    async def _get_or_generate_answer(
-        self,
-        *,
-        user_id: UUID,
-        mode: AssistantMode,
-        user_prompt: str | None,
-        context_decision: ContextDecision,
-        generator: Callable[[], Awaitable[str]],
-    ) -> str:
-        answer_cache_key = build_answer_cache_key(
-            user_id=user_id,
-            mode=mode,
-            user_prompt=user_prompt,
-            context_decision=context_decision,
-        )
-        cached_answer = await self._redis_state.get_answer(answer_cache_key)
-        if cached_answer is not None:
-            logger.info(
-                "Answer cache hit: user_id=%s mode=%s",
-                user_id,
-                mode.value,
-            )
-            return cached_answer
-
-        lock = await self._redis_state.acquire_answer_lock(
-            lock_key=build_answer_lock_key(answer_cache_key)
-        )
-        try:
-            answer = await generator()
-            await self._redis_state.set_answer(answer_cache_key, answer)
-            return answer
-        finally:
-            if lock is not None:
-                await self._redis_state.release_answer_lock(lock)
-
-    async def _get_or_generate_answer_safely(
-        self,
-        *,
-        user_id: UUID,
-        mode: AssistantMode,
-        user_prompt: str | None,
-        context_decision: ContextDecision,
-        generator: Callable[[], Awaitable[str]],
-    ) -> str:
-        try:
-            return await self._get_or_generate_answer(
-                user_id=user_id,
-                mode=mode,
-                user_prompt=user_prompt,
-                context_decision=context_decision,
-                generator=generator,
-            )
-        except GeminiRequestLimitError:
-            logger.warning(
-                "Gemini request rejected by limit: user_id=%s mode=%s",
-                user_id,
-                mode.value,
-            )
-            return build_context_too_large_response()
-        except GeminiRateLimitError:
-            logger.warning(
-                "Gemini rate limit fallback selected: user_id=%s mode=%s",
-                user_id,
-                mode.value,
-            )
-            return build_gemini_rate_limit_response()
-        except (GeminiTransientError, GeminiPermanentError) as exc:
-            logger.warning(
-                "Gemini unavailable fallback selected: user_id=%s mode=%s "
-                "error_type=%s",
-                user_id,
-                mode.value,
-                type(exc).__name__,
-            )
-            return build_gemini_unavailable_response()
-
     async def _publish_think(
         self,
-        user_id: UUID,
+        user_id: str,
         data: str,
         status: LLMStatus | None = None,
     ) -> None:
@@ -409,88 +218,29 @@ class TaskOrchestrator:
                 status=status.value.lower(),
             )
 
-    async def _publish_prompt_status(self, user_id: UUID, status: LLMStatus) -> None:
-        await self._publish_think(
-            user_id=user_id,
-            data=STATUS_MESSAGES[status],
-            status=status,
+    def _is_user_prompt_too_large(self, prompt: str) -> bool:
+        return len(prompt) > self._max_user_prompt_chars
+
+    def _calculate_warning(self, *, user_prompt: str) -> int:
+        return calculate_prompt_budget_warning(
+            max_prompt_chars=self._max_prompt_chars,
+            user_prompt=user_prompt,
+            prompt_markup=NO_RETRIEVAL_PROMPT_MARKUP,
         )
 
-    async def _publish_context_status(
-        self,
-        user_id: UUID,
-        retrieval_status: RetrievalStatus,
-    ) -> None:
-        if retrieval_status == RetrievalStatus.FOUND:
-            await self._publish_prompt_status(user_id, LLMStatus.FOUND)
-            return
-
-        if retrieval_status == RetrievalStatus.NOT_FOUND:
-            await self._publish_think(user_id=user_id, data=CONTEXT_NOT_FOUND_TEXT)
-            await self._redis_state.set_task_status(
-                user_id=user_id,
-                status="not_found",
-            )
-            return
-
-        await self._publish_think(user_id=user_id, data=CONTEXT_INSUFFICIENT_TEXT)
-        await self._redis_state.set_task_status(
-            user_id=user_id,
-            status="insufficient",
-        )
-
-    @staticmethod
-    def _should_use_response_builder(
-        *,
-        mode: AssistantMode,
-        retrieval_status: RetrievalStatus,
-    ) -> bool:
-        return (
-            mode == AssistantMode.DOCUMENT_SEARCH
-            or retrieval_status != RetrievalStatus.FOUND
-        )
-
-    @staticmethod
-    def _should_use_summary_incomplete_fallback(
-        *,
-        mode: AssistantMode,
-        retrieval_status: RetrievalStatus,
-    ) -> bool:
-        return (
-            mode == AssistantMode.SUMMARIZE_DOCUMENT
-            and retrieval_status == RetrievalStatus.INSUFFICIENT
-        )
-
-    def _is_user_prompt_too_large(self, prompt: str | None) -> bool:
-        return prompt is not None and len(prompt) > self._max_user_prompt_chars
-
-    def _context_exceeds_generation_limits(
-        self,
-        *,
-        mode: AssistantMode,
-        context_decision: ContextDecision,
-    ) -> bool:
-        if context_decision.status != RetrievalStatus.FOUND:
-            return False
-        if mode == AssistantMode.DOCUMENT_SEARCH:
-            return False
-
-        if any(
-            len(chunk.text) > self._max_chunk_chars
-            for chunk in context_decision.chunks
-        ):
-            return True
-
-        return (
-            mode != AssistantMode.SUMMARIZE_DOCUMENT
-            and len(context_decision.chunks) > self._max_chunks_per_request
+    def _prompt_budget_exceeded(self, *, user_prompt: str) -> bool:
+        return prompt_budget_exceeded(
+            max_prompt_chars=self._max_prompt_chars,
+            user_prompt=user_prompt,
+            prompt_markup=NO_RETRIEVAL_PROMPT_MARKUP,
         )
 
     async def _publish_response(
         self,
-        user_id: UUID,
+        user_id: str,
         data: str,
         *,
+        warning: int = 0,
         mark_completed: bool = True,
     ) -> None:
         await self._publisher.publish_event(
@@ -498,7 +248,7 @@ class TaskOrchestrator:
                 type=OutgoingEventType.RESPONSE,
                 user_id=user_id,
                 data=data,
-                warning=0,
+                warning=warning,
             )
         )
         if mark_completed:

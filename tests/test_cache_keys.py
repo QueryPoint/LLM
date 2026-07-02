@@ -69,14 +69,17 @@ def test_cache_keys_are_deterministic_and_do_not_expose_plaintext() -> None:
 
     intent_key = build_intent_cache_key(
         prompt=" Explain Redis cache ",
-        document_id=DOCUMENT_ID,
-        requested_mode=None,
+        uid="document-uid-123",
     )
     same_intent_key = build_intent_cache_key(
         prompt="explain   redis cache",
-        document_id=DOCUMENT_ID,
-        requested_mode=None,
+        uid="document-uid-123",
+    )
+    changed_uid_key = build_intent_cache_key(
+        prompt="explain   redis cache",
+        uid="another-document",
     )
 
     assert intent_key == same_intent_key
+    assert intent_key != changed_uid_key
     assert intent_key.startswith("intent:v1:")

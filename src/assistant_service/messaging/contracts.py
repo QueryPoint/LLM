@@ -4,7 +4,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from assistant_service.core.enums import (
-    AssistantMode,
     IncomingMessageType,
     OutgoingEventType,
     RetrievalStatus,
@@ -39,16 +38,36 @@ class DocumentContext(StrictBaseModel):
 
 class PromptRequestMessage(StrictBaseModel):
     type: Literal[IncomingMessageType.PROMPT]
-    user_id: UUID
-    prompt: str | None = None
-    doc: UUID | None = None
-    mode: AssistantMode | None = None
-    document_context: DocumentContext | None = None
+    user_id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    uid: str | None = None
+
+    @field_validator("user_id", "prompt", mode="before")
+    @classmethod
+    def _strip_required_string(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("uid", mode="before")
+    @classmethod
+    def _strip_optional_uid(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped_value = value.strip()
+            return stripped_value or None
+        return value
 
 
 class DeleteRequestMessage(StrictBaseModel):
     type: Literal[IncomingMessageType.DELETE]
-    user_id: UUID
+    user_id: str = Field(min_length=1)
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def _strip_user_id(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 IncomingMessage = Annotated[
@@ -59,15 +78,15 @@ IncomingMessage = Annotated[
 
 class ThinkEvent(StrictBaseModel):
     type: Literal[OutgoingEventType.THINK]
-    user_id: UUID
+    user_id: str = Field(min_length=1)
     data: str = Field(min_length=1)
 
 
 class ResponseEvent(StrictBaseModel):
     type: Literal[OutgoingEventType.RESPONSE]
-    user_id: UUID
+    user_id: str = Field(min_length=1)
     data: str = Field(min_length=1)
-    warning: int = Field(default=0, ge=0, le=100)
+    warning: int = Field(default=0, ge=0)
 
 
 OutgoingEvent = Annotated[

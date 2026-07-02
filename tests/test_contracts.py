@@ -1,53 +1,46 @@
 import pytest
 from pydantic import ValidationError
 
-from assistant_service.core.enums import AssistantMode, RetrievalStatus
 from assistant_service.messaging.contracts import (
     incoming_message_adapter,
     outgoing_event_adapter,
 )
 
 
-USER_ID = "00000000-0000-0000-0000-000000000002"
-DOC_ID = "00000000-0000-0000-0000-000000000004"
+USER_ID = "user-123"
 
 
-def test_prompt_is_valid() -> None:
+def test_prompt_accepts_minimal_uid_contract() -> None:
     message = incoming_message_adapter.validate_python(
         {
             "type": "prompt",
             "user_id": USER_ID,
-            "prompt": "Explain database normalization",
-            "doc": DOC_ID,
-            "mode": "explain_topic",
-            "document_context": {
-                "retrieval_status": "found",
-                "chunks": [
-                    {
-                        "chunk_id": "00000000-0000-0000-0000-000000000101",
-                        "document_id": DOC_ID,
-                        "file_name": " lecture.pdf ",
-                        "page": 2,
-                        "text": " Context text ",
-                        "score": 9.4,
-                    }
-                ],
-            },
+            "prompt": "Объясни нормализацию баз данных",
+            "uid": " document-uid-123 ",
         }
     )
 
     assert message.type == "prompt"
-    assert str(message.user_id) == USER_ID
-    assert message.prompt == "Explain database normalization"
-    assert str(message.doc) == DOC_ID
-    assert message.mode == AssistantMode.EXPLAIN_TOPIC
-    assert message.document_context is not None
-    assert message.document_context.retrieval_status == RetrievalStatus.FOUND
-    assert message.document_context.chunks[0].file_name == "lecture.pdf"
-    assert message.document_context.chunks[0].text == "Context text"
+    assert message.user_id == USER_ID
+    assert message.prompt == "Объясни нормализацию баз данных"
+    assert message.uid == "document-uid-123"
 
 
-def test_delete_is_valid() -> None:
+@pytest.mark.parametrize("field_name", ["mode", "document_context", "doc_uid", "doc"])
+def test_old_prompt_fields_are_not_accepted(field_name: str) -> None:
+    payload: dict[str, object] = {
+        "type": "prompt",
+        "user_id": USER_ID,
+        "prompt": "Объясни нормализацию",
+        "uid": None,
+        field_name: "legacy",
+    }
+
+    with pytest.raises(ValidationError):
+        incoming_message_adapter.validate_python(payload)
+
+
+def test_delete_is_valid_without_prompt_or_uid() -> None:
     message = incoming_message_adapter.validate_python(
         {
             "type": "delete",
@@ -56,86 +49,32 @@ def test_delete_is_valid() -> None:
     )
 
     assert message.type == "delete"
-    assert str(message.user_id) == USER_ID
+    assert message.user_id == USER_ID
 
 
-def test_think_is_valid() -> None:
+def test_think_event_keeps_human_readable_string_data() -> None:
     event = outgoing_event_adapter.validate_python(
         {
             "type": "think",
             "user_id": USER_ID,
-            "data": "Ищем релевантные материалы...",
+            "data": "Определяю тип запроса...",
         }
     )
 
     assert event.type == "think"
-    assert event.data == "Ищем релевантные материалы..."
+    assert isinstance(event.data, str)
+    assert event.data == "Определяю тип запроса..."
 
 
-def test_response_is_valid() -> None:
+def test_response_warning_remains_numeric_and_can_exceed_100() -> None:
     event = outgoing_event_adapter.validate_python(
         {
             "type": "response",
             "user_id": USER_ID,
             "data": "Ответ готов.",
+            "warning": 125,
         }
     )
 
     assert event.type == "response"
-    assert event.warning == 0
-
-
-def test_unknown_field_fails_validation() -> None:
-    with pytest.raises(ValidationError):
-        incoming_message_adapter.validate_python(
-            {
-                "type": "prompt",
-                "user_id": USER_ID,
-                "prompt": "Explain normalization",
-                "doc": None,
-                "unexpected": "value",
-            }
-        )
-
-
-@pytest.mark.parametrize(
-    "field_name, value",
-    [
-        ("retrieval_status", "unknown"),
-        ("page", 0),
-        ("text", "   "),
-        ("file_name", "   "),
-    ],
-)
-def test_invalid_document_context_fails_validation(
-    field_name: str,
-    value: object,
-) -> None:
-    chunk = {
-        "chunk_id": "00000000-0000-0000-0000-000000000101",
-        "document_id": DOC_ID,
-        "file_name": "lecture.pdf",
-        "page": 1,
-        "text": "Context text",
-        "score": 1.0,
-    }
-    document_context: dict[str, object] = {
-        "retrieval_status": "found",
-        "chunks": [chunk],
-    }
-
-    if field_name == "retrieval_status":
-        document_context[field_name] = value
-    else:
-        chunk[field_name] = value
-
-    with pytest.raises(ValidationError):
-        incoming_message_adapter.validate_python(
-            {
-                "type": "prompt",
-                "user_id": USER_ID,
-                "prompt": "Explain normalization",
-                "doc": DOC_ID,
-                "document_context": document_context,
-            }
-        )
+    assert event.warning == 125

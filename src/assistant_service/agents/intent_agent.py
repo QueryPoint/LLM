@@ -1,10 +1,9 @@
 from dataclasses import dataclass
 from typing import Literal
-from uuid import UUID
 
 from assistant_service.core.enums import AssistantMode
 
-DecisionSource = Literal["backend", "rule_based"]
+DecisionSource = Literal["rule_based"]
 
 SUMMARIZE_KEYWORDS = (
     "кратко",
@@ -54,15 +53,11 @@ class IntentDecision:
 class IntentAgent:
     def detect(
         self,
-        prompt: str | None,
-        document_id: UUID | None,
-        requested_mode: AssistantMode | None,
+        prompt: str,
+        uid: str | None,
     ) -> IntentDecision:
-        if requested_mode is not None:
-            return IntentDecision(mode=requested_mode, source="backend")
-
         normalized_prompt = self._normalize_prompt(prompt)
-        has_document = document_id is not None
+        has_document = uid is not None
 
         if has_document and (
             normalized_prompt == ""
@@ -91,8 +86,8 @@ class IntentAgent:
         )
 
     @staticmethod
-    def _normalize_prompt(prompt: str | None) -> str:
-        return " ".join((prompt or "").strip().lower().split())
+    def _normalize_prompt(prompt: str) -> str:
+        return " ".join(prompt.strip().lower().split())
 
     @staticmethod
     def _contains_keyword(prompt: str, keywords: tuple[str, ...]) -> bool:

@@ -11,7 +11,7 @@ INTENT_CACHE_PREFIX = "intent:v1:"
 
 def build_answer_cache_key(
     *,
-    user_id: UUID,
+    user_id: str | UUID,
     mode: AssistantMode,
     user_prompt: str | None,
     context_decision: ContextDecision,
@@ -43,23 +43,21 @@ def build_answer_lock_key(answer_cache_key: str) -> str:
 def build_intent_cache_key(
     *,
     prompt: str | None,
-    document_id: UUID | None,
-    requested_mode: AssistantMode | None,
+    uid: str | None,
 ) -> str:
     fingerprint = {
         "version": "v1",
         "prompt": _normalize_text(prompt),
-        "document_id": str(document_id) if document_id is not None else None,
-        "requested_mode": requested_mode.value if requested_mode is not None else None,
+        "uid": _normalize_uid(uid),
     }
     return f"{INTENT_CACHE_PREFIX}{_stable_hash(fingerprint)}"
 
 
-def build_task_status_key(*, user_id: UUID) -> str:
+def build_task_status_key(*, user_id: str | UUID) -> str:
     return f"task:{user_id}:status"
 
 
-def build_session_summary_key(*, user_id: UUID) -> str:
+def build_session_summary_key(*, user_id: str | UUID) -> str:
     return f"chat_summary:{user_id}"
 
 
@@ -67,6 +65,13 @@ def _normalize_text(text: str | None) -> str:
     if text is None:
         return ""
     return " ".join(text.strip().lower().split())
+
+
+def _normalize_uid(uid: str | None) -> str | None:
+    if uid is None:
+        return None
+    stripped_uid = uid.strip()
+    return stripped_uid or None
 
 
 def _stable_hash(payload: object) -> str:
