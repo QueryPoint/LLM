@@ -41,10 +41,30 @@ class Settings(BaseSettings):
     elasticsearch_index: str = "documents"
     elasticsearch_timeout_seconds: int = Field(default=5, gt=0)
     elasticsearch_max_results: int = Field(default=8, gt=0)
+    minio_endpoint: str | None = None
+    minio_bucket: str | None = None
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_secure: bool = False
+    minio_spike_enabled: bool = False
 
     @field_validator("gemini_api_key", mode="before")
     @classmethod
     def _normalize_optional_secret(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped_value = value.strip()
+            return stripped_value or None
+        return value
+
+    @field_validator(
+        "minio_endpoint",
+        "minio_bucket",
+        "minio_access_key",
+        "minio_secret_key",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_optional_text(cls, value: object) -> object:
         if isinstance(value, str):
             stripped_value = value.strip()
             return stripped_value or None
