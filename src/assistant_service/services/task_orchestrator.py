@@ -9,7 +9,12 @@ from assistant_service.agents.intent_agent import (
     IntentDecision,
     IntentTaskType,
 )
-from assistant_service.core.enums import LLMStatus, OutgoingEventType
+from assistant_service.core.enums import (
+    AssistantMode,
+    LLMStatus,
+    OutgoingEventType,
+    RetrievalStatus,
+)
 from assistant_service.messaging.contracts import (
     DeleteRequestMessage,
     IncomingMessage,
@@ -24,18 +29,42 @@ from assistant_service.services.prompt_budget import (
 )
 from assistant_service.services.response_builder import (
     build_context_too_large_response,
+    build_gemini_rate_limit_response,
+    build_gemini_unavailable_response,
     build_materials_not_found_response,
     build_request_too_large_response,
+    build_response_text,
+    build_retrieval_unavailable_response,
+    build_summary_requires_complete_document_response,
     build_unsupported_request_response,
 )
+from assistant_service.services.elasticsearch_client import (
+    ElasticsearchIndexNotFoundError,
+    ElasticsearchResponseError,
+    ElasticsearchUnavailableError,
+)
+from assistant_service.services.gemini_client import (
+    GeminiPermanentError,
+    GeminiRateLimitError,
+    GeminiRequestLimitError,
+    GeminiTransientError,
+)
 from assistant_service.services.redis_state import RedisStateStore
+from assistant_service.services.retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
 
 DETERMINE_INTENT_TEXT = "Определяю тип запроса..."
+SEARCH_MATERIALS_TEXT = "Ищу подходящие материалы..."
+GENERATE_ANSWER_TEXT = "Формирую ответ..."
 DELETE_THINK_TEXT = "История диалога очищена."
 SAFE_ERROR_RESPONSE = "Не удалось обработать запрос. Попробуйте ещё раз."
 NO_RETRIEVAL_PROMPT_MARKUP = "ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n\nКОНТЕКСТ:\n"
+EXPECTED_RETRIEVAL_ERRORS = (
+    ElasticsearchUnavailableError,
+    ElasticsearchIndexNotFoundError,
+    ElasticsearchResponseError,
+)
 
 
 class EventPublisher(Protocol):
@@ -51,6 +80,7 @@ class TaskOrchestrator:
         context_agent: ContextAgent,
         answer_agent: AnswerAgent,
         document_summary_agent: DocumentSummaryAgent,
+        retrieval_service: RetrievalService,
         redis_state: RedisStateStore,
         max_user_prompt_chars: int,
         max_chunk_chars: int,
@@ -71,6 +101,7 @@ class TaskOrchestrator:
         self._context_agent = context_agent
         self._answer_agent = answer_agent
         self._document_summary_agent = document_summary_agent
+        self._retrieval_service = retrieval_service
         self._redis_state = redis_state
         self._max_user_prompt_chars = max_user_prompt_chars
         self._max_chunk_chars = max_chunk_chars
@@ -160,8 +191,7 @@ class TaskOrchestrator:
 
         intent_decision = await self._detect_intent(message)
         logger.info(
-            "Intent detected without retrieval: user_id=%s task_type=%s "
-            "selection_source=%s has_uid=%s",
+            "Intent detected: user_id=%s task_type=%s selection_source=%s has_uid=%s",
             message.user_id,
             intent_decision.task_type.value,
             intent_decision.source,
@@ -175,14 +205,145 @@ class TaskOrchestrator:
             )
             return
 
-        await self._redis_state.set_task_status(
+        if intent_decision.task_type == IntentTaskType.SUMMARIZE_DOCUMENT:
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_summary_requires_complete_document_response(),
+                warning=warning,
+            )
+            return
+
+        if not intent_decision.keywords:
+            await self._redis_state.set_task_status(
+                user_id=message.user_id,
+                status="not_found",
+            )
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_materials_not_found_response(),
+                warning=warning,
+            )
+            return
+
+        await self._publish_think(
             user_id=message.user_id,
-            status="not_found",
+            data=SEARCH_MATERIALS_TEXT,
+            status=LLMStatus.SEARCHING,
         )
+        try:
+            search_results = await self._retrieval_service.search(
+                intent_decision=intent_decision,
+                uid=message.uid,
+            )
+        except EXPECTED_RETRIEVAL_ERRORS:
+            logger.warning(
+                "Retrieval failed with expected error: user_id=%s task_type=%s",
+                message.user_id,
+                intent_decision.task_type.value,
+            )
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_retrieval_unavailable_response(),
+                warning=warning,
+            )
+            return
+
+        assistant_mode = self._assistant_mode_for_task(intent_decision.task_type)
+        context_decision = self._context_agent.prepare(
+            search_results,
+            mode=assistant_mode,
+        )
+        if context_decision.status == RetrievalStatus.FOUND:
+            await self._redis_state.set_task_status(
+                user_id=message.user_id,
+                status=LLMStatus.FOUND.value.lower(),
+            )
+
+        if context_decision.status != RetrievalStatus.FOUND:
+            await self._redis_state.set_task_status(
+                user_id=message.user_id,
+                status=context_decision.status.value,
+            )
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_materials_not_found_response(),
+                warning=warning,
+            )
+            return
+
+        if self._context_exceeds_limits(context_decision):
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_context_too_large_response(),
+                warning=warning,
+            )
+            return
+
+        if assistant_mode == AssistantMode.DOCUMENT_SEARCH:
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_response_text(assistant_mode, context_decision),
+                warning=warning,
+            )
+            return
+
+        generation_request = self._answer_agent.build_generation_request(
+            mode=assistant_mode,
+            user_prompt=message.prompt,
+            context_decision=context_decision,
+        )
+        generation_warning = self._calculate_generation_warning(
+            system_instruction=generation_request.system_instruction,
+            prompt=generation_request.prompt,
+        )
+        if self._generation_prompt_budget_exceeded(
+            system_instruction=generation_request.system_instruction,
+            prompt=generation_request.prompt,
+        ):
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_context_too_large_response(),
+                warning=generation_warning,
+            )
+            return
+
+        await self._publish_think(
+            user_id=message.user_id,
+            data=GENERATE_ANSWER_TEXT,
+            status=LLMStatus.GENERATING,
+        )
+        try:
+            answer_text = await self._answer_agent.answer(
+                mode=assistant_mode,
+                user_prompt=message.prompt,
+                context_decision=context_decision,
+            )
+        except GeminiRequestLimitError:
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_context_too_large_response(),
+                warning=generation_warning,
+            )
+            return
+        except GeminiRateLimitError:
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_gemini_rate_limit_response(),
+                warning=generation_warning,
+            )
+            return
+        except (GeminiTransientError, GeminiPermanentError):
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_gemini_unavailable_response(),
+                warning=generation_warning,
+            )
+            return
+
         await self._publish_response(
             user_id=message.user_id,
-            data=build_materials_not_found_response(),
-            warning=warning,
+            data=answer_text,
+            warning=generation_warning,
         )
 
     async def _handle_delete(self, message: DeleteRequestMessage) -> None:
@@ -236,6 +397,48 @@ class TaskOrchestrator:
             user_prompt=user_prompt,
             prompt_markup=NO_RETRIEVAL_PROMPT_MARKUP,
         )
+
+    def _calculate_generation_warning(
+        self,
+        *,
+        system_instruction: str,
+        prompt: str,
+    ) -> int:
+        return calculate_prompt_budget_warning(
+            max_prompt_chars=self._max_prompt_chars,
+            system_instruction=system_instruction,
+            prompt_markup=prompt,
+        )
+
+    def _generation_prompt_budget_exceeded(
+        self,
+        *,
+        system_instruction: str,
+        prompt: str,
+    ) -> bool:
+        return prompt_budget_exceeded(
+            max_prompt_chars=self._max_prompt_chars,
+            system_instruction=system_instruction,
+            prompt_markup=prompt,
+        )
+
+    def _context_exceeds_limits(self, context_decision: object) -> bool:
+        chunks = getattr(context_decision, "chunks", ())
+        if len(chunks) > self._max_chunks_per_request:
+            return True
+
+        return any(len(chunk.text) > self._max_chunk_chars for chunk in chunks)
+
+    @staticmethod
+    def _assistant_mode_for_task(task_type: IntentTaskType) -> AssistantMode:
+        if task_type == IntentTaskType.ANSWER_QUESTION:
+            return AssistantMode.ANSWER_QUESTION
+        if task_type == IntentTaskType.EXPLAIN_TOPIC:
+            return AssistantMode.EXPLAIN_TOPIC
+        if task_type == IntentTaskType.DOCUMENT_SEARCH:
+            return AssistantMode.DOCUMENT_SEARCH
+
+        raise ValueError(f"Unsupported retrieval task type: {task_type.value}")
 
     async def _publish_response(
         self,
