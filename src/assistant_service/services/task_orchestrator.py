@@ -119,11 +119,7 @@ class TaskOrchestrator:
                 return
 
         except Exception:
-            logger.exception(
-                "Task orchestrator processing failed: user_id=%s message_type=%s",
-                message.user_id,
-                message.type,
-            )
+            logger.exception("Task orchestrator processing failed")
             await self._redis_state.set_task_status(
                 user_id=message.user_id,
                 status="failed",
@@ -136,12 +132,7 @@ class TaskOrchestrator:
                 )
                 return
             except Exception:
-                logger.exception(
-                    "Task orchestrator failed to publish safe response: "
-                    "user_id=%s message_type=%s",
-                    message.user_id,
-                    message.type,
-                )
+                logger.exception("Task orchestrator failed to publish safe response")
                 raise
 
         raise ValueError(f"Unsupported incoming message type: {message.type}")
@@ -149,11 +140,7 @@ class TaskOrchestrator:
     async def _handle_prompt(self, message: PromptRequestMessage) -> None:
         warning = self._calculate_warning(user_prompt=message.prompt)
         if self._is_user_prompt_too_large(message.prompt):
-            logger.info(
-                "Prompt rejected by local limit: user_id=%s prompt_chars=%s",
-                message.user_id,
-                len(message.prompt),
-            )
+            logger.info("Request rejected by local limit")
             await self._publish_response(
                 user_id=message.user_id,
                 data=build_request_too_large_response(),
@@ -162,11 +149,7 @@ class TaskOrchestrator:
             return
 
         if self._prompt_budget_exceeded(user_prompt=message.prompt):
-            logger.info(
-                "Prompt rejected by budget limit: user_id=%s warning=%s",
-                message.user_id,
-                warning,
-            )
+            logger.info("Request rejected by budget limit")
             await self._publish_response(
                 user_id=message.user_id,
                 data=build_context_too_large_response(),
@@ -175,8 +158,7 @@ class TaskOrchestrator:
             return
 
         logger.info(
-            "Task orchestrator received prompt: user_id=%s has_uid=%s",
-            message.user_id,
+            "Task orchestrator received request: document_uid_present=%s",
             message.uid is not None,
         )
         await self._redis_state.set_task_status(
@@ -191,8 +173,7 @@ class TaskOrchestrator:
 
         intent_decision = await self._detect_intent(message)
         logger.info(
-            "Intent detected: user_id=%s task_type=%s selection_source=%s has_uid=%s",
-            message.user_id,
+            "Intent detected: task_type=%s selection_source=%s document_uid_present=%s",
             intent_decision.task_type.value,
             intent_decision.source,
             message.uid is not None,
@@ -235,11 +216,11 @@ class TaskOrchestrator:
                 intent_decision=intent_decision,
                 uid=message.uid,
             )
-        except EXPECTED_RETRIEVAL_ERRORS:
+        except EXPECTED_RETRIEVAL_ERRORS as exc:
             logger.warning(
-                "Retrieval failed with expected error: user_id=%s task_type=%s",
-                message.user_id,
+                "Retrieval failed with expected error: task_type=%s error_type=%s",
                 intent_decision.task_type.value,
+                type(exc).__name__,
             )
             await self._publish_response(
                 user_id=message.user_id,
@@ -348,8 +329,7 @@ class TaskOrchestrator:
 
     async def _handle_delete(self, message: DeleteRequestMessage) -> None:
         logger.info(
-            "Task orchestrator received delete: user_id=%s",
-            message.user_id,
+            "Task orchestrator received delete",
         )
         await self._redis_state.clear_user_state(user_id=message.user_id)
         await self._publish_think(user_id=message.user_id, data=DELETE_THINK_TEXT)
@@ -371,8 +351,7 @@ class TaskOrchestrator:
             )
         )
         logger.info(
-            "Task orchestrator published think event: user_id=%s status=%s",
-            user_id,
+            "Task orchestrator published think event: status=%s",
             status.value if status is not None else None,
         )
         if status is not None:
