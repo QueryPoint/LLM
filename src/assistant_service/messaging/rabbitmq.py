@@ -58,8 +58,7 @@ class RabbitMQPublisher:
         payload = outgoing_event_adapter.dump_python(event, mode="json")
         await self._publish_json(payload)
         logger.info(
-            "Outgoing event published: user_id=%s type=%s",
-            event.user_id,
+            "Outgoing event published: type=%s",
             event.type,
         )
 
@@ -174,18 +173,14 @@ class RabbitMQWorker:
             return
 
         logger.info(
-            "Incoming message accepted: user_id=%s type=%s",
-            request.user_id,
+            "Incoming message accepted: type=%s",
             request.type,
         )
 
         try:
             await self._process_request(request)
         except Exception as exc:
-            logger.exception(
-                "Unexpected handler error: user_id=%s",
-                request.user_id,
-            )
+            logger.exception("Unexpected handler error: type=%s", request.type)
             attempt = self._get_processing_attempt(message)
             if attempt < self._max_processing_attempts:
                 try:

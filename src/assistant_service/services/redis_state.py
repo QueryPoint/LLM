@@ -55,6 +55,7 @@ class RedisStateStore:
         task_status_ttl_seconds: int,
         session_summary_ttl_seconds: int,
         answer_lock_ttl_seconds: int,
+        retrieval_cache_ttl_seconds: int,
     ) -> None:
         self._validate_positive_ttl(answer_cache_ttl_seconds, "answer_cache_ttl_seconds")
         self._validate_positive_ttl(intent_cache_ttl_seconds, "intent_cache_ttl_seconds")
@@ -64,6 +65,10 @@ class RedisStateStore:
             "session_summary_ttl_seconds",
         )
         self._validate_positive_ttl(answer_lock_ttl_seconds, "answer_lock_ttl_seconds")
+        self._validate_positive_ttl(
+            retrieval_cache_ttl_seconds,
+            "retrieval_cache_ttl_seconds",
+        )
 
         self._client = client
         self._answer_cache_ttl_seconds = answer_cache_ttl_seconds
@@ -71,6 +76,7 @@ class RedisStateStore:
         self._task_status_ttl_seconds = task_status_ttl_seconds
         self._session_summary_ttl_seconds = session_summary_ttl_seconds
         self._answer_lock_ttl_seconds = answer_lock_ttl_seconds
+        self._retrieval_cache_ttl_seconds = retrieval_cache_ttl_seconds
 
     async def get_answer(self, key: str) -> str | None:
         try:
@@ -213,6 +219,31 @@ class RedisStateStore:
             build_session_summary_key(user_id=user_id),
         )
 
+    async def get_retrieval_cache_payload(self, *, key: str) -> str | None:
+        try:
+            raw_value = await self._client.get(key)
+            if raw_value is None:
+                return None
+            if not isinstance(raw_value, str):
+                return None
+            return raw_value
+        except RedisError as exc:
+            self._log_redis_error("get_retrieval_cache_payload", exc)
+            return None
+
+    async def set_retrieval_cache_payload(self, *, key: str, payload: str) -> None:
+        try:
+            await self._client.set(
+                key,
+                payload,
+                ex=self._retrieval_cache_ttl_seconds,
+            )
+        except RedisError as exc:
+            self._log_redis_error("set_retrieval_cache_payload", exc)
+
+    async def delete_retrieval_cache_payload(self, *, key: str) -> None:
+        await self._delete_keys("delete_retrieval_cache_payload", key)
+
     async def acquire_answer_lock(self, *, lock_key: str) -> AnswerLock | None:
         token = uuid.uuid4().hex
         try:
@@ -270,4 +301,5 @@ def create_redis_state_store_from_settings(settings: Settings) -> RedisStateStor
         task_status_ttl_seconds=settings.redis_task_status_ttl_seconds,
         session_summary_ttl_seconds=settings.redis_session_summary_ttl_seconds,
         answer_lock_ttl_seconds=settings.redis_answer_lock_ttl_seconds,
+        retrieval_cache_ttl_seconds=settings.retrieval_cache_ttl_seconds,
     )

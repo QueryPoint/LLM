@@ -64,6 +64,10 @@ class ElasticsearchClient:
         self._index_name = normalized_index_name
         self._max_results = max_results
 
+    @property
+    def index_name(self) -> str:
+        return self._index_name
+
     async def search(
         self,
         *,
