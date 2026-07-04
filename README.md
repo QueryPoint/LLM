@@ -164,6 +164,10 @@ user_id
 Query text строится только из `IntentDecision.keywords`. Raw user prompt не
 используется как Elasticsearch query.
 
+Найденные `SearchResult` кэшируются в Redis с TTL 900 секунд. Пустые
+результаты не кэшируются, а повреждённый cache entry удаляется best effort и
+обрабатывается как cache miss.
+
 ## Grounded Answer Flow
 
 Для `answer_question` и `explain_topic` Gemini вызывается только после того,
@@ -214,6 +218,7 @@ ELASTICSEARCH_URL=http://elasticsearch:9200
 ELASTICSEARCH_INDEX=documents
 ELASTICSEARCH_TIMEOUT_SECONDS=5
 ELASTICSEARCH_MAX_RESULTS=8
+RETRIEVAL_CACHE_TTL_SECONDS=900
 ```
 
 При локальном запуске с Mac можно переопределить:
@@ -249,5 +254,6 @@ curl -X POST "http://localhost:9200/documents/_search?pretty" \
   }'
 ```
 
-Sprint-13 намеренно не реализует Redis retrieval cache, MinIO/S3, presigned
-URLs, full-document summary, `chunk_order` support и vector search.
+Sprint-14 добавляет Redis retrieval cache. MinIO/S3, presigned URLs,
+full-document summary, `chunk_order` support и vector search по-прежнему не
+реализованы.

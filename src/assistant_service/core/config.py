@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     redis_task_status_ttl_seconds: int = Field(default=3600, gt=0)
     redis_session_summary_ttl_seconds: int = Field(default=21600, gt=0)
     redis_answer_lock_ttl_seconds: int = Field(default=90, gt=0)
+    retrieval_cache_ttl_seconds: int = Field(default=900, gt=0)
     elasticsearch_url: str = "http://elasticsearch:9200"
     elasticsearch_index: str = "documents"
     elasticsearch_timeout_seconds: int = Field(default=5, gt=0)

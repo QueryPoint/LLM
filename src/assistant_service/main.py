@@ -58,7 +58,10 @@ async def run_worker() -> None:
         gemini_client = create_gemini_client_from_settings(settings)
         redis_state = create_redis_state_store_from_settings(settings)
         elasticsearch_client = create_elasticsearch_client_from_settings(settings)
-        retrieval_service = RetrievalService(search_client=elasticsearch_client)
+        retrieval_service = RetrievalService(
+            search_client=elasticsearch_client,
+            redis_state=redis_state,
+        )
         intent_agent = IntentAgent(text_generator=gemini_client)
         answer_agent = AnswerAgent(text_generator=gemini_client)
         document_summary_agent = DocumentSummaryAgent(

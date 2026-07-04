@@ -64,6 +64,7 @@ def _store(client: FakeRedisClient) -> RedisStateStore:
         task_status_ttl_seconds=3600,
         session_summary_ttl_seconds=21600,
         answer_lock_ttl_seconds=90,
+        retrieval_cache_ttl_seconds=900,
     )
 
 
