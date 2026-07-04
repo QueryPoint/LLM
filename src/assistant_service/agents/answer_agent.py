@@ -1,10 +1,10 @@
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Protocol
 
-from assistant_service.agents.context_agent import ContextDecision
+from assistant_service.agents.context_agent import ContextChunk, ContextDecision
 from assistant_service.core.enums import AssistantMode, RetrievalStatus
-from assistant_service.messaging.contracts import RetrievedChunk
 from assistant_service.services.gemini_client import GeminiClientError
 
 logger = logging.getLogger(__name__)
@@ -92,9 +92,35 @@ class StreamingTextGenerator(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class AnswerGenerationRequest:
+    system_instruction: str
+    prompt: str
+    max_output_tokens: int
+    temperature: float
+
+
 class AnswerAgent:
     def __init__(self, text_generator: StreamingTextGenerator) -> None:
         self._text_generator = text_generator
+
+    def build_generation_request(
+        self,
+        *,
+        mode: AssistantMode,
+        user_prompt: str | None,
+        context_decision: ContextDecision,
+    ) -> AnswerGenerationRequest:
+        self._validate_generation_path(mode=mode, context_decision=context_decision)
+        return AnswerGenerationRequest(
+            system_instruction=self._build_system_instruction(mode),
+            prompt=self._build_user_prompt(
+                user_prompt=user_prompt,
+                chunks=context_decision.chunks,
+            ),
+            max_output_tokens=MAX_OUTPUT_TOKENS_BY_MODE[mode],
+            temperature=GENERATION_TEMPERATURE,
+        )
 
     async def answer(
         self,
@@ -103,11 +129,10 @@ class AnswerAgent:
         user_prompt: str | None,
         context_decision: ContextDecision,
     ) -> str:
-        self._validate_generation_path(mode=mode, context_decision=context_decision)
-        system_instruction = self._build_system_instruction(mode)
-        gemini_prompt = self._build_user_prompt(
+        request = self.build_generation_request(
+            mode=mode,
             user_prompt=user_prompt,
-            chunks=context_decision.chunks,
+            context_decision=context_decision,
         )
 
         logger.info(
@@ -117,10 +142,10 @@ class AnswerAgent:
         )
         fragments: list[str] = []
         async for fragment in self._text_generator.stream_text(
-            system_instruction=system_instruction,
-            prompt=gemini_prompt,
-            max_output_tokens=MAX_OUTPUT_TOKENS_BY_MODE[mode],
-            temperature=GENERATION_TEMPERATURE,
+            system_instruction=request.system_instruction,
+            prompt=request.prompt,
+            max_output_tokens=request.max_output_tokens,
+            temperature=request.temperature,
         ):
             fragments.append(fragment)
 
@@ -163,7 +188,7 @@ class AnswerAgent:
     def _build_user_prompt(
         *,
         user_prompt: str | None,
-        chunks: tuple[RetrievedChunk, ...],
+        chunks: tuple[ContextChunk, ...],
     ) -> str:
         normalized_user_prompt = (
             user_prompt.strip()
