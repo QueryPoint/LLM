@@ -3,7 +3,9 @@ import asyncio
 import pytest
 
 from assistant_service.agents.intent_agent import IntentDecision, IntentTaskType
-from assistant_service.core.enums import OutgoingEventType
+from assistant_service.agents.answer_agent import AnswerGenerationRequest
+from assistant_service.agents.context_agent import ContextAgent
+from assistant_service.core.enums import AssistantMode, OutgoingEventType
 from assistant_service.messaging.contracts import (
     IncomingMessage,
     OutgoingEvent,
@@ -15,11 +17,19 @@ from assistant_service.services.response_builder import (
     build_context_too_large_response,
     build_materials_not_found_response,
     build_request_too_large_response,
+    build_retrieval_unavailable_response,
+    build_summary_requires_complete_document_response,
     build_unsupported_request_response,
+)
+from assistant_service.services.elasticsearch_client import (
+    ElasticsearchUnavailableError,
+    SearchResult,
 )
 from assistant_service.services.task_orchestrator import (
     DETERMINE_INTENT_TEXT,
+    GENERATE_ANSWER_TEXT,
     SAFE_ERROR_RESPONSE,
+    SEARCH_MATERIALS_TEXT,
     TaskOrchestrator,
 )
 
@@ -29,6 +39,7 @@ MAX_USER_PROMPT_CHARS = 4_000
 MAX_CHUNK_CHARS = 12_000
 MAX_CHUNKS_PER_REQUEST = 32
 MAX_PROMPT_CHARS = 16_000
+DOCUMENT_UID = "document-uid-123"
 
 
 class FakePublisher:
@@ -74,22 +85,50 @@ class FakeIntentAgent:
         )
 
 
-class FakeContextAgent:
+class RecordingContextAgent(ContextAgent):
     def __init__(self) -> None:
-        self.calls: list[object] = []
+        super().__init__()
+        self.calls: list[tuple[object, AssistantMode | None]] = []
 
-    def prepare(self, *args: object, **kwargs: object) -> object:
-        self.calls.append((args, kwargs))
-        raise AssertionError("ContextAgent must not be called without retrieval")
+    def prepare(
+        self,
+        search_results: object,
+        mode: AssistantMode | None = None,
+    ) -> object:
+        self.calls.append((search_results, mode))
+        return super().prepare(search_results, mode=mode)
 
 
 class FakeAnswerAgent:
-    def __init__(self) -> None:
+    def __init__(self, response: str = "Ответ по найденным материалам") -> None:
         self.calls: list[object] = []
+        self.build_calls: list[object] = []
+        self._response = response
+
+    def build_generation_request(
+        self,
+        *,
+        mode: AssistantMode,
+        user_prompt: str | None,
+        context_decision: object,
+    ) -> AnswerGenerationRequest:
+        self.build_calls.append(
+            {
+                "mode": mode,
+                "user_prompt": user_prompt,
+                "context_decision": context_decision,
+            }
+        )
+        return AnswerGenerationRequest(
+            system_instruction="system",
+            prompt=f"prompt {user_prompt}",
+            max_output_tokens=1024,
+            temperature=0.2,
+        )
 
     async def answer(self, **kwargs: object) -> str:
         self.calls.append(kwargs)
-        raise AssertionError("AnswerAgent must not be called without retrieval")
+        return self._response
 
 
 class FakeDocumentSummaryAgent:
@@ -99,6 +138,28 @@ class FakeDocumentSummaryAgent:
     async def summarize(self, **kwargs: object) -> str:
         self.calls.append(kwargs)
         raise AssertionError("DocumentSummaryAgent must not be called without retrieval")
+
+
+class FakeRetrievalService:
+    def __init__(
+        self,
+        results: tuple[SearchResult, ...] = (),
+        error: Exception | None = None,
+    ) -> None:
+        self.calls: list[tuple[IntentDecision, str | None]] = []
+        self._results = results
+        self._error = error
+
+    async def search(
+        self,
+        *,
+        intent_decision: IntentDecision,
+        uid: str | None,
+    ) -> tuple[SearchResult, ...]:
+        self.calls.append((intent_decision, uid))
+        if self._error is not None:
+            raise self._error
+        return self._results
 
 
 class FakeRedisState:
@@ -141,9 +202,10 @@ def _orchestrator(
     *,
     publisher: FakePublisher | None = None,
     intent_agent: FakeIntentAgent | None = None,
-    context_agent: FakeContextAgent | None = None,
+    context_agent: RecordingContextAgent | None = None,
     answer_agent: FakeAnswerAgent | None = None,
     document_summary_agent: FakeDocumentSummaryAgent | None = None,
+    retrieval_service: FakeRetrievalService | None = None,
     redis_state: FakeRedisState | None = None,
     max_user_prompt_chars: int = MAX_USER_PROMPT_CHARS,
     max_prompt_chars: int = MAX_PROMPT_CHARS,
@@ -151,9 +213,10 @@ def _orchestrator(
     return TaskOrchestrator(
         publisher=publisher or FakePublisher(),
         intent_agent=intent_agent or FakeIntentAgent(),
-        context_agent=context_agent or FakeContextAgent(),
+        context_agent=context_agent or RecordingContextAgent(),
         answer_agent=answer_agent or FakeAnswerAgent(),
         document_summary_agent=document_summary_agent or FakeDocumentSummaryAgent(),
+        retrieval_service=retrieval_service or FakeRetrievalService(),
         redis_state=redis_state or FakeRedisState(),
         max_user_prompt_chars=max_user_prompt_chars,
         max_chunk_chars=MAX_CHUNK_CHARS,
@@ -162,12 +225,28 @@ def _orchestrator(
     )
 
 
-def test_prompt_without_retrieval_publishes_think_then_controlled_fallback() -> None:
+def _search_result(
+    *,
+    text: str = "Нормализация уменьшает избыточность данных.",
+) -> SearchResult:
+    return SearchResult(
+        doc_id=DOCUMENT_UID,
+        chunk_id="chunk-1",
+        file_name="lecture.pdf",
+        page_number=5,
+        text=text,
+        score=12.5,
+        highlights=(),
+    )
+
+
+def test_empty_retrieval_publishes_materials_not_found_without_answer_agent() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent()
-    context_agent = FakeContextAgent()
+    context_agent = RecordingContextAgent()
     answer_agent = FakeAnswerAgent()
     document_summary_agent = FakeDocumentSummaryAgent()
+    retrieval_service = FakeRetrievalService(results=())
     redis_state = FakeRedisState()
     orchestrator = _orchestrator(
         publisher=publisher,
@@ -175,24 +254,27 @@ def test_prompt_without_retrieval_publishes_think_then_controlled_fallback() -> 
         context_agent=context_agent,
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
+        retrieval_service=retrieval_service,
         redis_state=redis_state,
         max_prompt_chars=100,
     )
 
-    asyncio.run(orchestrator.handle(_prompt_message(uid="document-uid-123")))
+    asyncio.run(orchestrator.handle(_prompt_message(uid=DOCUMENT_UID)))
 
     assert [event.type for event in publisher.events] == [
+        OutgoingEventType.THINK,
         OutgoingEventType.THINK,
         OutgoingEventType.RESPONSE,
     ]
     assert publisher.events[0].data == DETERMINE_INTENT_TEXT
+    assert publisher.events[1].data == SEARCH_MATERIALS_TEXT
     assert isinstance(publisher.events[0].data, str)
-    assert publisher.events[1].data == build_materials_not_found_response()
-    assert publisher.events[1].warning > 0
-    assert intent_agent.calls == [
-        ("Объясни нормализацию баз данных", "document-uid-123")
-    ]
-    assert context_agent.calls == []
+    assert publisher.events[2].data == build_materials_not_found_response()
+    assert publisher.events[2].warning > 0
+    assert intent_agent.calls == [("Объясни нормализацию баз данных", DOCUMENT_UID)]
+    assert len(retrieval_service.calls) == 1
+    assert retrieval_service.calls[0][1] == DOCUMENT_UID
+    assert len(context_agent.calls) == 1
     assert answer_agent.calls == []
     assert document_summary_agent.calls == []
     assert redis_state.task_statuses[-1] == (USER_ID, "completed")
@@ -217,19 +299,92 @@ def test_unsupported_intent_returns_deterministic_response_without_agents() -> N
     intent_agent = FakeIntentAgent(task_type=IntentTaskType.UNSUPPORTED)
     answer_agent = FakeAnswerAgent()
     document_summary_agent = FakeDocumentSummaryAgent()
+    retrieval_service = FakeRetrievalService(results=(_search_result(),))
     orchestrator = _orchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
         answer_agent=answer_agent,
         document_summary_agent=document_summary_agent,
+        retrieval_service=retrieval_service,
     )
 
     asyncio.run(orchestrator.handle(_prompt_message(prompt="Создай сайт")))
 
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_unsupported_request_response()
+    assert retrieval_service.calls == []
     assert answer_agent.calls == []
     assert document_summary_agent.calls == []
+
+
+def test_found_context_invokes_answer_agent_once_with_single_response() -> None:
+    publisher = FakePublisher()
+    context_agent = RecordingContextAgent()
+    answer_agent = FakeAnswerAgent(response="Grounded answer")
+    retrieval_service = FakeRetrievalService(results=(_search_result(),))
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        context_agent=context_agent,
+        answer_agent=answer_agent,
+        retrieval_service=retrieval_service,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message(uid=DOCUMENT_UID)))
+
+    assert [event.data for event in publisher.events if event.type == OutgoingEventType.THINK] == [
+        DETERMINE_INTENT_TEXT,
+        SEARCH_MATERIALS_TEXT,
+        GENERATE_ANSWER_TEXT,
+    ]
+    response_events = [
+        event for event in publisher.events if event.type == OutgoingEventType.RESPONSE
+    ]
+    assert len(response_events) == 1
+    assert response_events[0].data == "Grounded answer"
+    assert len(context_agent.calls) == 1
+    assert context_agent.calls[0][0] == (_search_result(),)
+    assert context_agent.calls[0][1] == AssistantMode.EXPLAIN_TOPIC
+    assert len(answer_agent.build_calls) == 1
+    assert len(answer_agent.calls) == 1
+
+
+def test_summary_intent_returns_full_document_fallback_without_summary_agent() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
+    document_summary_agent = FakeDocumentSummaryAgent()
+    retrieval_service = FakeRetrievalService(results=(_search_result(),))
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        document_summary_agent=document_summary_agent,
+        retrieval_service=retrieval_service,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary")))
+
+    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
+    assert publisher.events[-1].data == build_summary_requires_complete_document_response()
+    assert retrieval_service.calls == []
+    assert document_summary_agent.calls == []
+
+
+def test_expected_elasticsearch_error_returns_retrieval_unavailable_response() -> None:
+    publisher = FakePublisher()
+    answer_agent = FakeAnswerAgent()
+    retrieval_service = FakeRetrievalService(
+        error=ElasticsearchUnavailableError("unavailable")
+    )
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        answer_agent=answer_agent,
+        retrieval_service=retrieval_service,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message()))
+
+    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
+    assert publisher.events[-1].data == build_retrieval_unavailable_response()
+    assert answer_agent.calls == []
 
 
 def test_prompt_budget_boundary_returns_context_too_large_without_agents() -> None:
@@ -284,7 +439,7 @@ def test_oversized_user_prompt_returns_response_without_agents() -> None:
 def test_delete_publishes_only_think_confirmation_and_clears_user_state() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent()
-    context_agent = FakeContextAgent()
+    context_agent = RecordingContextAgent()
     answer_agent = FakeAnswerAgent()
     document_summary_agent = FakeDocumentSummaryAgent()
     redis_state = FakeRedisState()
