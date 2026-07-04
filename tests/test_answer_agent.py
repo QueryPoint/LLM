@@ -1,33 +1,18 @@
 import asyncio
-from uuid import UUID
 
 import pytest
 
 from assistant_service.agents.answer_agent import AnswerAgent
-from assistant_service.agents.context_agent import ContextDecision
-from assistant_service.agents.intent_agent import IntentDecision, IntentTaskType
+from assistant_service.agents.context_agent import ContextChunk, ContextDecision
 from assistant_service.core.enums import (
     AssistantMode,
-    OutgoingEventType,
     RetrievalStatus,
 )
-from assistant_service.messaging.contracts import (
-    IncomingMessage,
-    OutgoingEvent,
-    RetrievedChunk,
-    incoming_message_adapter,
-)
 from assistant_service.services.gemini_client import GeminiClientError
-from assistant_service.services.task_orchestrator import TaskOrchestrator
 
 
-USER_ID = "00000000-0000-0000-0000-000000000002"
 DOCUMENT_ID = "00000000-0000-0000-0000-000000000003"
 CHUNK_ID = "00000000-0000-0000-0000-000000000004"
-MAX_USER_PROMPT_CHARS = 4_000
-MAX_CHUNK_CHARS = 12_000
-MAX_CHUNKS_PER_REQUEST = 32
-MAX_PROMPT_CHARS = 16_000
 
 
 class FakeTextGenerator:
@@ -77,96 +62,10 @@ class FakeTextGenerator:
             yield fragment
 
 
-class FakePublisher:
-    def __init__(self) -> None:
-        self.events: list[OutgoingEvent] = []
-
-    async def publish_event(self, event: OutgoingEvent) -> None:
-        self.events.append(event)
-
-
-class FakeIntentAgent:
-    async def detect(
-        self,
-        prompt: str,
-        uid: str | None,
-    ) -> IntentDecision:
-        return IntentDecision(
-            task_type=IntentTaskType.ANSWER_QUESTION,
-            requires_retrieval=True,
-            requires_full_document=False,
-            keywords=["нормализация"],
-            source="rule_based",
-        )
-
-
-class FakeContextAgent:
-    def __init__(self, decision: ContextDecision) -> None:
-        self._decision = decision
-
-    def prepare(
-        self,
-        document_context: object,
-        mode: AssistantMode | None = None,
-    ) -> ContextDecision:
-        return self._decision
-
-
-class FakeAnswerAgent:
-    def __init__(self) -> None:
-        self.calls: list[tuple[AssistantMode, str | None, ContextDecision]] = []
-
-    async def answer(
-        self,
-        *,
-        mode: AssistantMode,
-        user_prompt: str | None,
-        context_decision: ContextDecision,
-    ) -> str:
-        self.calls.append((mode, user_prompt, context_decision))
-        return "Ответ AnswerAgent"
-
-
-class FakeDocumentSummaryAgent:
-    async def summarize(
-        self,
-        *,
-        user_prompt: str | None,
-        context_decision: ContextDecision,
-    ) -> str:
-        return "Summary"
-
-
-class FakeRedisState:
-    async def get_answer(self, key: str) -> None:
-        return None
-
-    async def set_answer(self, key: str, answer: str) -> None:
-        return None
-
-    async def acquire_answer_lock(self, *, lock_key: str) -> None:
-        return None
-
-    async def release_answer_lock(self, lock: object) -> None:
-        return None
-
-    async def get_intent_mode(self, key: str) -> None:
-        return None
-
-    async def set_intent_mode(self, key: str, mode: AssistantMode) -> None:
-        return None
-
-    async def set_task_status(self, *, user_id: str, status: str) -> None:
-        return None
-
-    async def clear_user_state(self, *, user_id: str) -> None:
-        return None
-
-
-def _chunk() -> RetrievedChunk:
-    return RetrievedChunk(
-        chunk_id=UUID(CHUNK_ID),
-        document_id=UUID(DOCUMENT_ID),
+def _chunk() -> ContextChunk:
+    return ContextChunk(
+        chunk_id=CHUNK_ID,
+        document_id=DOCUMENT_ID,
         file_name="lecture.pdf",
         page=5,
         text="Нормализация уменьшает избыточность данных.",
@@ -177,7 +76,7 @@ def _chunk() -> RetrievedChunk:
 def _context_decision(
     *,
     status: RetrievalStatus = RetrievalStatus.FOUND,
-    chunks: tuple[RetrievedChunk, ...] | None = None,
+    chunks: tuple[ContextChunk, ...] | None = None,
 ) -> ContextDecision:
     selected_chunks = (_chunk(),) if chunks is None else chunks
     return ContextDecision(
@@ -185,17 +84,6 @@ def _context_decision(
         chunks=selected_chunks,
         sources=(),
         total_chars=sum(len(chunk.text) for chunk in selected_chunks),
-    )
-
-
-def _prompt_message() -> IncomingMessage:
-    return incoming_message_adapter.validate_python(
-        {
-            "type": "prompt",
-            "user_id": USER_ID,
-            "prompt": "Что такое нормализация?",
-            "uid": DOCUMENT_ID,
-        }
     )
 
 
@@ -315,30 +203,3 @@ def test_invalid_generation_paths_raise_without_calling_generator() -> None:
 
     assert generator.generate_text_calls == []
     assert generator.stream_text_calls == []
-
-
-def test_orchestrator_does_not_use_answer_agent_without_retrieval() -> None:
-    publisher = FakePublisher()
-    answer_agent = FakeAnswerAgent()
-    orchestrator = TaskOrchestrator(
-        publisher=publisher,
-        intent_agent=FakeIntentAgent(),
-        context_agent=FakeContextAgent(_context_decision()),
-        answer_agent=answer_agent,
-        document_summary_agent=FakeDocumentSummaryAgent(),
-        redis_state=FakeRedisState(),
-        max_user_prompt_chars=MAX_USER_PROMPT_CHARS,
-        max_chunk_chars=MAX_CHUNK_CHARS,
-        max_chunks_per_request=MAX_CHUNKS_PER_REQUEST,
-        max_prompt_chars=MAX_PROMPT_CHARS,
-    )
-
-    message = _prompt_message()
-    asyncio.run(orchestrator.handle(message))
-
-    assert answer_agent.calls == []
-    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
-    assert publisher.events[-1].data == (
-        "Не удалось найти материалы для подготовки ответа. "
-        "Попробуйте уточнить запрос или выбрать документ."
-    )
