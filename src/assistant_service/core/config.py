@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     redis_task_status_ttl_seconds: int = Field(default=3600, gt=0)
     redis_session_summary_ttl_seconds: int = Field(default=21600, gt=0)
     redis_answer_lock_ttl_seconds: int = Field(default=90, gt=0)
+    elasticsearch_url: str = "http://elasticsearch:9200"
+    elasticsearch_index: str = "documents"
+    elasticsearch_timeout_seconds: int = Field(default=5, gt=0)
+    elasticsearch_max_results: int = Field(default=8, gt=0)
 
     @field_validator("gemini_api_key", mode="before")
     @classmethod
@@ -45,14 +49,25 @@ class Settings(BaseSettings):
             return stripped_value or None
         return value
 
-    @field_validator("gemini_model", "redis_url", mode="before")
+    @field_validator(
+        "gemini_model",
+        "redis_url",
+        "elasticsearch_url",
+        "elasticsearch_index",
+        mode="before",
+    )
     @classmethod
     def _strip_required_text(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip()
         return value
 
-    @field_validator("gemini_model", "redis_url")
+    @field_validator(
+        "gemini_model",
+        "redis_url",
+        "elasticsearch_url",
+        "elasticsearch_index",
+    )
     @classmethod
     def _validate_required_text(cls, value: str) -> str:
         if value == "":
