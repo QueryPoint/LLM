@@ -42,6 +42,9 @@ UNSUPPORTED_REQUEST_RESPONSE = (
     "университета: отвечает на вопросы по базе знаний, объясняет темы, ищет "
     "документы и готовит краткие изложения."
 )
+RETRIEVAL_UNAVAILABLE_RESPONSE = (
+    "Не удалось выполнить поиск по базе знаний. Попробуйте позже."
+)
 
 
 def build_response_text(mode: AssistantMode, context_decision: ContextDecision) -> str:
@@ -96,6 +99,10 @@ def build_materials_not_found_response() -> str:
 
 def build_unsupported_request_response() -> str:
     return UNSUPPORTED_REQUEST_RESPONSE
+
+
+def build_retrieval_unavailable_response() -> str:
+    return RETRIEVAL_UNAVAILABLE_RESPONSE
 
 
 def _build_document_search_response(context_decision: ContextDecision) -> str:
