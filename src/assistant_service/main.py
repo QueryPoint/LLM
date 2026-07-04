@@ -10,6 +10,10 @@ from assistant_service.agents.document_summary_agent import DocumentSummaryAgent
 from assistant_service.agents.intent_agent import IntentAgent
 from assistant_service.core.config import settings
 from assistant_service.messaging.rabbitmq import RabbitMQWorker
+from assistant_service.services.elasticsearch_client import (
+    ElasticsearchClient,
+    create_elasticsearch_client_from_settings,
+)
 from assistant_service.services.gemini_client import (
     GeminiClient,
     create_gemini_client_from_settings,
@@ -18,6 +22,7 @@ from assistant_service.services.redis_state import (
     RedisStateStore,
     create_redis_state_store_from_settings,
 )
+from assistant_service.services.retrieval_service import RetrievalService
 from assistant_service.services.task_orchestrator import TaskOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -47,10 +52,13 @@ async def run_worker() -> None:
     )
     gemini_client: GeminiClient | None = None
     redis_state: RedisStateStore | None = None
+    elasticsearch_client: ElasticsearchClient | None = None
     context_agent = ContextAgent()
     try:
         gemini_client = create_gemini_client_from_settings(settings)
         redis_state = create_redis_state_store_from_settings(settings)
+        elasticsearch_client = create_elasticsearch_client_from_settings(settings)
+        retrieval_service = RetrievalService(search_client=elasticsearch_client)
         intent_agent = IntentAgent(text_generator=gemini_client)
         answer_agent = AnswerAgent(text_generator=gemini_client)
         document_summary_agent = DocumentSummaryAgent(
@@ -64,6 +72,7 @@ async def run_worker() -> None:
             context_agent=context_agent,
             answer_agent=answer_agent,
             document_summary_agent=document_summary_agent,
+            retrieval_service=retrieval_service,
             redis_state=redis_state,
             max_user_prompt_chars=settings.gemini_max_user_prompt_chars,
             max_chunk_chars=settings.gemini_max_chunk_chars,
@@ -92,6 +101,11 @@ async def run_worker() -> None:
                 await redis_state.aclose()
             except Exception:
                 logger.exception("Redis state close failed")
+        if elasticsearch_client is not None:
+            try:
+                await elasticsearch_client.aclose()
+            except Exception:
+                logger.exception("Elasticsearch client close failed")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
