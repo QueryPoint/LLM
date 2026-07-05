@@ -177,11 +177,27 @@ context.
 Для `document_search` Gemini не вызывается: response строится
 детерминированно по найденным материалам.
 
-Для `summarize_document` полный summary временно не выполняется, потому что в
-index нет надёжного `chunk_order`. Сервис возвращает:
+Для `summarize_document` полный summary поддерживается только для выбранного
+PDF-документа. Сервис получает `file_name` из Elasticsearch, скачивает PDF из
+MinIO и передаёт файл в Gemini через Files API. DOCX и другие форматы пока не
+поддерживаются.
+
+Если `uid` не передан:
 
 ```text
 Для подготовки краткого изложения нужен полный текст выбранного документа.
+```
+
+Если выбранный документ не PDF:
+
+```text
+Краткое изложение пока доступно только для PDF-документов.
+```
+
+Если документ не удалось скачать или обработать:
+
+```text
+Не удалось подготовить краткое изложение документа. Попробуйте позже.
 ```
 
 Если материалы не найдены:
@@ -236,7 +252,13 @@ MINIO_ACCESS_KEY=
 MINIO_SECRET_KEY=
 MINIO_SECURE=false
 MINIO_SPIKE_ENABLED=false
+DOCUMENT_SUMMARY_MAX_FILE_BYTES=20971520
 ```
+
+`DOCUMENT_SUMMARY_MAX_FILE_BYTES` ограничивает размер PDF для production
+full-document summary. Текущий MinIO storage convention является временным
+техническим ограничением LLM-service: объект PDF собирается как
+`<user_id>/<uid>.pdf` после проверки `file_name` из Elasticsearch.
 
 The document probe is an isolated manual tool and is not part of the RabbitMQ
 worker flow:
@@ -279,6 +301,6 @@ curl -X POST "http://localhost:9200/documents/_search?pretty" \
   }'
 ```
 
-Sprint-14 добавляет Redis retrieval cache. MinIO/S3, presigned URLs,
-full-document summary, `chunk_order` support и vector search по-прежнему не
-реализованы.
+Sprint-16 добавляет PDF full-document summary через MinIO и Gemini Files API.
+Presigned URLs, DOCX summary, `chunk_order` support и vector search по-прежнему
+не реализованы.

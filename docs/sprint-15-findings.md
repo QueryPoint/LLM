@@ -66,11 +66,17 @@ Chosen option:
 B. Files API only for PDF; DOCX through backend text extraction / conversion to PDF.
 ```
 
-Before Sprint-16, backend/Infra must provide:
+Sprint-16 can use the confirmed temporary backend storage convention for PDF:
 
 ```text
-1. LLM-service must not derive MinIO object keys from user_id/doc_id/doc_type.
-2. Backend must provide one stable internal file-access contract for an authorized uid.
-3. Preferred contract: internal backend endpoint returning file bytes/stream.
-4. Acceptable contract: metadata lookup returning storage_key and mime_type.
+<user_id>/<doc_id>.pdf
+```
+
+This remains a technical limitation of the current LLM-service implementation.
+A future production contract should replace derived object keys with one stable
+internal file-access contract for an authorized `uid`:
+
+```text
+1. Preferred contract: internal backend endpoint returning file bytes/stream.
+2. Acceptable contract: metadata lookup returning storage_key and mime_type.
 ```
