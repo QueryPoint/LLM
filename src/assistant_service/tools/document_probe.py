@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Protocol
 
 from google import genai
@@ -109,8 +110,9 @@ class MinioObjectStorageClient:
         secret_key: str,
         secure: bool,
     ) -> None:
+        normalized_endpoint = self._normalize_endpoint(endpoint)
         self._client = Minio(
-            endpoint,
+            normalized_endpoint,
             access_key=access_key,
             secret_key=secret_key,
             secure=secure,
@@ -144,6 +146,13 @@ class MinioObjectStorageClient:
         finally:
             response.close()
             response.release_conn()
+
+    @staticmethod
+    def _normalize_endpoint(endpoint: str) -> str:
+        parsed = urlparse(endpoint.strip())
+        if parsed.scheme and parsed.netloc:
+            return parsed.netloc
+        return endpoint.strip().rstrip("/")
 
 
 class GeminiDocumentProbe:

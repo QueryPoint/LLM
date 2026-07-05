@@ -3,6 +3,7 @@ import asyncio
 from assistant_service.tools.document_probe import (
     GeminiDocumentProbe,
     MethodProbeResult,
+    MinioObjectStorageClient,
     run_document_probe,
     run_from_environment,
 )
@@ -98,6 +99,11 @@ def test_document_probe_disabled_refuses_before_network_calls() -> None:
 
     assert exit_code == 2
     assert lines == ["reason=spike_disabled"]
+
+
+def test_minio_endpoint_accepts_scheme_and_host_form() -> None:
+    assert MinioObjectStorageClient._normalize_endpoint("http://localhost:9000") == "localhost:9000"
+    assert MinioObjectStorageClient._normalize_endpoint("localhost:9000") == "localhost:9000"
 
 
 def test_document_probe_unsupported_extension_skips_minio_and_gemini() -> None:
