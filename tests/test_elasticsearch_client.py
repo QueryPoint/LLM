@@ -78,3 +78,34 @@ def test_document_scoped_search_filters_by_doc_id_without_global_fallback() -> N
         }
     }
     assert "user_id" not in str(body)
+
+
+def test_document_metadata_lookup_filters_by_doc_id_and_reads_file_name() -> None:
+    fake_client = FakeAsyncElasticsearch(
+        response={
+            "hits": {
+                "hits": [
+                    {
+                        "_source": {
+                            "doc_id": "document-uid-123",
+                            "file_name": " lecture.PDF ",
+                        }
+                    }
+                ]
+            }
+        }
+    )
+    client = ElasticsearchClient(fake_client, index_name="documents", max_results=8)
+
+    metadata = asyncio.run(client.get_document_metadata(uid="document-uid-123"))
+
+    assert metadata is not None
+    assert metadata.doc_id == "document-uid-123"
+    assert metadata.file_name == "lecture.PDF"
+    body = fake_client.calls[0]["body"]
+    assert body == {
+        "size": 1,
+        "_source": ["doc_id", "file_name"],
+        "query": {"term": {"doc_id": "document-uid-123"}},
+    }
+    assert "user_id" not in str(body)

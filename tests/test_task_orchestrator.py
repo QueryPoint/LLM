@@ -15,19 +15,24 @@ from assistant_service.messaging.contracts import (
 )
 from assistant_service.services.response_builder import (
     build_context_too_large_response,
+    build_document_summary_unavailable_response,
     build_materials_not_found_response,
+    build_pdf_only_summary_response,
     build_request_too_large_response,
     build_retrieval_unavailable_response,
     build_summary_requires_complete_document_response,
     build_unsupported_request_response,
 )
 from assistant_service.services.elasticsearch_client import (
+    DocumentMetadata,
     ElasticsearchUnavailableError,
     SearchResult,
 )
 from assistant_service.services.task_orchestrator import (
     DETERMINE_INTENT_TEXT,
     GENERATE_ANSWER_TEXT,
+    GENERATE_SUMMARY_TEXT,
+    PREPARE_DOCUMENT_TEXT,
     SAFE_ERROR_RESPONSE,
     SEARCH_MATERIALS_TEXT,
     TaskOrchestrator,
@@ -145,10 +150,15 @@ class FakeRetrievalService:
         self,
         results: tuple[SearchResult, ...] = (),
         error: Exception | None = None,
+        metadata: DocumentMetadata | None = None,
+        metadata_error: Exception | None = None,
     ) -> None:
         self.calls: list[tuple[IntentDecision, str | None]] = []
+        self.metadata_calls: list[str] = []
         self._results = results
         self._error = error
+        self._metadata = metadata
+        self._metadata_error = metadata_error
 
     async def search(
         self,
@@ -160,6 +170,46 @@ class FakeRetrievalService:
         if self._error is not None:
             raise self._error
         return self._results
+
+    async def get_document_metadata(self, *, uid: str) -> DocumentMetadata | None:
+        self.metadata_calls.append(uid)
+        if self._metadata_error is not None:
+            raise self._metadata_error
+        return self._metadata
+
+
+class FakeDocumentStorage:
+    def __init__(
+        self,
+        data: bytes = b"%PDF-1.4",
+        error: Exception | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self._data = data
+        self._error = error
+
+    async def download_pdf_for_summary(self, *, user_id: str, document_id: str) -> bytes:
+        self.calls.append((user_id, document_id))
+        if self._error is not None:
+            raise self._error
+        return self._data
+
+
+class FakePdfSummaryService:
+    def __init__(
+        self,
+        summary: str = "Краткое изложение PDF",
+        error: Exception | None = None,
+    ) -> None:
+        self.calls: list[bytes] = []
+        self._summary = summary
+        self._error = error
+
+    async def summarize_pdf(self, *, pdf_bytes: bytes) -> str:
+        self.calls.append(pdf_bytes)
+        if self._error is not None:
+            raise self._error
+        return self._summary
 
 
 class FakeRedisState:
@@ -206,6 +256,8 @@ def _orchestrator(
     answer_agent: FakeAnswerAgent | None = None,
     document_summary_agent: FakeDocumentSummaryAgent | None = None,
     retrieval_service: FakeRetrievalService | None = None,
+    document_storage: FakeDocumentStorage | None = None,
+    pdf_summary_service: FakePdfSummaryService | None = None,
     redis_state: FakeRedisState | None = None,
     max_user_prompt_chars: int = MAX_USER_PROMPT_CHARS,
     max_prompt_chars: int = MAX_PROMPT_CHARS,
@@ -217,6 +269,8 @@ def _orchestrator(
         answer_agent=answer_agent or FakeAnswerAgent(),
         document_summary_agent=document_summary_agent or FakeDocumentSummaryAgent(),
         retrieval_service=retrieval_service or FakeRetrievalService(),
+        document_storage=document_storage or FakeDocumentStorage(),
+        pdf_summary_service=pdf_summary_service or FakePdfSummaryService(),
         redis_state=redis_state or FakeRedisState(),
         max_user_prompt_chars=max_user_prompt_chars,
         max_chunk_chars=MAX_CHUNK_CHARS,
@@ -353,11 +407,15 @@ def test_summary_intent_returns_full_document_fallback_without_summary_agent() -
     intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
     document_summary_agent = FakeDocumentSummaryAgent()
     retrieval_service = FakeRetrievalService(results=(_search_result(),))
+    document_storage = FakeDocumentStorage()
+    pdf_summary_service = FakePdfSummaryService()
     orchestrator = _orchestrator(
         publisher=publisher,
         intent_agent=intent_agent,
         document_summary_agent=document_summary_agent,
         retrieval_service=retrieval_service,
+        document_storage=document_storage,
+        pdf_summary_service=pdf_summary_service,
     )
 
     asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary")))
@@ -365,7 +423,120 @@ def test_summary_intent_returns_full_document_fallback_without_summary_agent() -
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_summary_requires_complete_document_response()
     assert retrieval_service.calls == []
+    assert retrieval_service.metadata_calls == []
+    assert document_storage.calls == []
+    assert pdf_summary_service.calls == []
     assert document_summary_agent.calls == []
+
+
+def test_summary_missing_metadata_returns_controlled_fallback_without_minio_or_gemini() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
+    retrieval_service = FakeRetrievalService(metadata=None)
+    document_storage = FakeDocumentStorage()
+    pdf_summary_service = FakePdfSummaryService()
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        retrieval_service=retrieval_service,
+        document_storage=document_storage,
+        pdf_summary_service=pdf_summary_service,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID)))
+
+    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
+    assert publisher.events[-1].data == build_document_summary_unavailable_response()
+    assert retrieval_service.metadata_calls == [DOCUMENT_UID]
+    assert document_storage.calls == []
+    assert pdf_summary_service.calls == []
+
+
+def test_summary_non_pdf_metadata_returns_pdf_only_fallback_without_minio_or_gemini() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
+    retrieval_service = FakeRetrievalService(
+        metadata=DocumentMetadata(doc_id=DOCUMENT_UID, file_name="lecture.docx")
+    )
+    document_storage = FakeDocumentStorage()
+    pdf_summary_service = FakePdfSummaryService()
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        retrieval_service=retrieval_service,
+        document_storage=document_storage,
+        pdf_summary_service=pdf_summary_service,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID)))
+
+    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
+    assert publisher.events[-1].data == build_pdf_only_summary_response()
+    assert retrieval_service.metadata_calls == [DOCUMENT_UID]
+    assert document_storage.calls == []
+    assert pdf_summary_service.calls == []
+
+
+def test_summary_pdf_flow_returns_gemini_summary_with_single_response() -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
+    retrieval_service = FakeRetrievalService(
+        metadata=DocumentMetadata(doc_id=DOCUMENT_UID, file_name="lecture.PDF")
+    )
+    document_storage = FakeDocumentStorage(data=b"%PDF-1.4 content")
+    pdf_summary_service = FakePdfSummaryService(summary="Структурированное изложение")
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        retrieval_service=retrieval_service,
+        document_storage=document_storage,
+        pdf_summary_service=pdf_summary_service,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID)))
+
+    assert [event.data for event in publisher.events if event.type == OutgoingEventType.THINK] == [
+        DETERMINE_INTENT_TEXT,
+        "Определяю выбранный документ.",
+        PREPARE_DOCUMENT_TEXT,
+        GENERATE_SUMMARY_TEXT,
+    ]
+    response_events = [
+        event for event in publisher.events if event.type == OutgoingEventType.RESPONSE
+    ]
+    assert len(response_events) == 1
+    assert response_events[0].data == "Структурированное изложение"
+    assert retrieval_service.metadata_calls == [DOCUMENT_UID]
+    assert document_storage.calls == [(USER_ID, DOCUMENT_UID)]
+    assert pdf_summary_service.calls == [b"%PDF-1.4 content"]
+
+
+def test_summary_minio_error_returns_controlled_fallback_without_requeue() -> None:
+    from assistant_service.services.minio_storage import DocumentStorageUnavailableError
+
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
+    retrieval_service = FakeRetrievalService(
+        metadata=DocumentMetadata(doc_id=DOCUMENT_UID, file_name="lecture.pdf")
+    )
+    document_storage = FakeDocumentStorage(
+        error=DocumentStorageUnavailableError("unavailable")
+    )
+    pdf_summary_service = FakePdfSummaryService()
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        retrieval_service=retrieval_service,
+        document_storage=document_storage,
+        pdf_summary_service=pdf_summary_service,
+    )
+
+    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID)))
+
+    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
+    assert publisher.events[-1].data == build_document_summary_unavailable_response()
+    assert document_storage.calls == [(USER_ID, DOCUMENT_UID)]
+    assert pdf_summary_service.calls == []
 
 
 def test_expected_elasticsearch_error_returns_retrieval_unavailable_response() -> None:
