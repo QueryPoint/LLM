@@ -17,6 +17,7 @@ from assistant_service.core.config import Settings
 logger = logging.getLogger(__name__)
 
 SOURCE_FIELDS = ("chunk_id", "doc_id", "file_name", "page_number", "text")
+METADATA_SOURCE_FIELDS = ("doc_id", "file_name")
 
 
 class ElasticsearchClientError(RuntimeError):
@@ -44,6 +45,12 @@ class SearchResult:
     text: str
     score: float
     highlights: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentMetadata:
+    doc_id: str
+    file_name: str
 
 
 class ElasticsearchClient:
@@ -99,6 +106,36 @@ class ElasticsearchClient:
 
         return self._normalize_response(response)
 
+    async def get_document_metadata(self, *, uid: str) -> DocumentMetadata | None:
+        normalized_uid = uid.strip()
+        if normalized_uid == "":
+            return None
+
+        query = {
+            "size": 1,
+            "_source": list(METADATA_SOURCE_FIELDS),
+            "query": {"term": {"doc_id": normalized_uid}},
+        }
+        try:
+            response = await self._client.search(index=self._index_name, body=query)
+        except NotFoundError as exc:
+            self._log_expected_error("metadata_lookup", exc)
+            raise ElasticsearchIndexNotFoundError(
+                "Elasticsearch index is not available."
+            ) from exc
+        except (ConnectionError, ConnectionTimeout) as exc:
+            self._log_expected_error("metadata_lookup", exc)
+            raise ElasticsearchUnavailableError(
+                "Elasticsearch is not available."
+            ) from exc
+        except (ApiError, SerializationError, TransportError) as exc:
+            self._log_expected_error("metadata_lookup", exc)
+            raise ElasticsearchResponseError(
+                "Elasticsearch returned an invalid response."
+            ) from exc
+
+        return self._normalize_metadata_response(response)
+
     async def aclose(self) -> None:
         await self._client.close()
 
@@ -149,6 +186,31 @@ class ElasticsearchClient:
         ]
         return tuple(results)
 
+    def _normalize_metadata_response(self, response: object) -> DocumentMetadata | None:
+        response_body = getattr(response, "body", response)
+        if not isinstance(response_body, Mapping):
+            raise ElasticsearchResponseError(
+                "Elasticsearch response has unexpected format."
+            )
+
+        hits_container = response_body.get("hits")
+        if not isinstance(hits_container, Mapping):
+            raise ElasticsearchResponseError(
+                "Elasticsearch response has unexpected hits format."
+            )
+
+        raw_hits = hits_container.get("hits", [])
+        if not isinstance(raw_hits, list):
+            raise ElasticsearchResponseError(
+                "Elasticsearch response has unexpected hit list format."
+            )
+
+        for hit in raw_hits:
+            metadata = self._normalize_metadata_hit(hit)
+            if metadata is not None:
+                return metadata
+        return None
+
     @staticmethod
     def _normalize_hit(hit: object) -> SearchResult | None:
         if not isinstance(hit, Mapping):
@@ -191,6 +253,22 @@ class ElasticsearchClient:
             score=normalized_score,
             highlights=highlights,
         )
+
+    @staticmethod
+    def _normalize_metadata_hit(hit: object) -> DocumentMetadata | None:
+        if not isinstance(hit, Mapping):
+            return None
+
+        source = hit.get("_source")
+        if not isinstance(source, Mapping):
+            return None
+
+        doc_id = ElasticsearchClient._required_string(source.get("doc_id"))
+        file_name = ElasticsearchClient._required_string(source.get("file_name"))
+        if doc_id is None or file_name is None:
+            return None
+
+        return DocumentMetadata(doc_id=doc_id, file_name=file_name)
 
     @staticmethod
     def _required_string(value: object) -> str | None:

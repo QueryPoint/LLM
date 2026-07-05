@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     minio_secret_key: str | None = None
     minio_secure: bool = False
     minio_spike_enabled: bool = False
+    document_summary_max_file_bytes: int = Field(default=20_971_520, gt=0)
 
     @field_validator("gemini_api_key", mode="before")
     @classmethod

@@ -2,7 +2,7 @@ import logging
 from typing import Protocol
 
 from assistant_service.agents.intent_agent import IntentDecision
-from assistant_service.services.elasticsearch_client import SearchResult
+from assistant_service.services.elasticsearch_client import DocumentMetadata, SearchResult
 from assistant_service.services.retrieval_cache import (
     build_retrieval_cache_key,
     deserialize_search_results,
@@ -25,6 +25,9 @@ class SearchClient(Protocol):
         query_text: str,
         uid: str | None,
     ) -> tuple[SearchResult, ...]:
+        ...
+
+    async def get_document_metadata(self, *, uid: str) -> DocumentMetadata | None:
         ...
 
 
@@ -67,6 +70,9 @@ class RetrievalService:
                 results=results,
             )
         return results
+
+    async def get_document_metadata(self, *, uid: str) -> DocumentMetadata | None:
+        return await self._search_client.get_document_metadata(uid=uid)
 
     async def _get_cached_results(self, cache_key: str) -> tuple[SearchResult, ...] | None:
         raw_payload = await self._redis_state.get_retrieval_cache_payload(key=cache_key)
