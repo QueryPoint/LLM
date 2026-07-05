@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import tempfile
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from numbers import Real
 
@@ -34,6 +36,9 @@ class GeminiPermanentError(GeminiClientError):
 RATE_LIMIT_STATUS_CODE = 429
 TRANSIENT_STATUS_CODES = frozenset({408, 500, 502, 503, 504})
 PERMANENT_STATUS_CODES = frozenset({400, 401, 403, 404, 413, 422})
+GEMINI_FILE_READY_STATES = frozenset({"ACTIVE", "SUCCEEDED"})
+GEMINI_FILE_FAILED_STATES = frozenset({"FAILED", "ERROR"})
+GEMINI_FILE_PROCESSING_POLL_SECONDS = 2
 
 
 class GeminiClient:
@@ -190,8 +195,100 @@ class GeminiClient:
         if emitted_fragments == 0:
             raise GeminiClientError("Gemini streaming response did not contain text.")
 
+    async def summarize_pdf_document(
+        self,
+        *,
+        data: bytes,
+        prompt: str,
+        max_output_tokens: int = 1200,
+        temperature: float = 0.1,
+    ) -> str:
+        normalized_prompt = prompt.strip()
+        if data == b"":
+            raise GeminiRequestLimitError("Gemini document input is empty.")
+        if normalized_prompt == "":
+            raise ValueError("prompt must not be empty")
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        if not isinstance(temperature, Real) or not 0.0 <= temperature <= 1.0:
+            raise ValueError("temperature must be between 0.0 and 1.0")
+
+        uploaded_file: object | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf") as temporary_file:
+                temporary_file.write(data)
+                temporary_file.flush()
+                uploaded_file = await self._client.aio.files.upload(
+                    file=temporary_file.name,
+                    config=types.UploadFileConfig(mime_type="application/pdf"),
+                )
+
+            uploaded_file = await self._wait_until_file_ready(uploaded_file)
+            response = await self._client.aio.models.generate_content(
+                model=self._model,
+                contents=[normalized_prompt, uploaded_file],
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                ),
+            )
+            return self._extract_text(response)
+        except GeminiClientError:
+            raise
+        except Exception as exc:
+            self._log_generation_failure("pdf_document_summary", exc)
+            if self._extract_status_code(exc) == RATE_LIMIT_STATUS_CODE:
+                raise GeminiRateLimitError("Gemini rate limit exceeded.") from exc
+            if self._is_transient_exception(exc, self._extract_status_code(exc)):
+                raise GeminiTransientError("Gemini document summary failed.") from exc
+            raise GeminiPermanentError("Gemini document summary failed.") from exc
+        finally:
+            if uploaded_file is not None:
+                await self._delete_uploaded_file(uploaded_file)
+
     async def aclose(self) -> None:
         await self._client.aio.aclose()
+
+    async def _wait_until_file_ready(self, uploaded_file: object) -> object:
+        name = getattr(uploaded_file, "name", None)
+        if not isinstance(name, str) or name == "":
+            return uploaded_file
+
+        deadline = time.monotonic() + self._timeout_seconds
+        current_file = uploaded_file
+        while time.monotonic() < deadline:
+            state = self._file_state(current_file)
+            if state is None or state in GEMINI_FILE_READY_STATES:
+                return current_file
+            if state in GEMINI_FILE_FAILED_STATES:
+                raise GeminiTransientError("Gemini file processing failed.")
+
+            await self._sleep(GEMINI_FILE_PROCESSING_POLL_SECONDS)
+            current_file = await self._client.aio.files.get(name=name)
+
+        raise GeminiTransientError("Gemini file processing timed out.")
+
+    async def _delete_uploaded_file(self, uploaded_file: object) -> None:
+        name = getattr(uploaded_file, "name", None)
+        if not isinstance(name, str) or name == "":
+            return
+
+        try:
+            await self._client.aio.files.delete(name=name)
+        except Exception as exc:
+            logger.warning(
+                "Gemini file cleanup failed: operation=%s error_type=%s",
+                "files_api_delete",
+                type(exc).__name__,
+            )
+
+    @staticmethod
+    def _file_state(file_object: object) -> str | None:
+        state = getattr(file_object, "state", None)
+        if state is None:
+            return None
+        value = getattr(state, "value", state)
+        return str(value).upper()
 
     def _validate_generation_parameters(
         self,

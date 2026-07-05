@@ -29,9 +29,11 @@ from assistant_service.services.prompt_budget import (
 )
 from assistant_service.services.response_builder import (
     build_context_too_large_response,
+    build_document_summary_unavailable_response,
     build_gemini_rate_limit_response,
     build_gemini_unavailable_response,
     build_materials_not_found_response,
+    build_pdf_only_summary_response,
     build_request_too_large_response,
     build_response_text,
     build_retrieval_unavailable_response,
@@ -49,6 +51,11 @@ from assistant_service.services.gemini_client import (
     GeminiRequestLimitError,
     GeminiTransientError,
 )
+from assistant_service.services.minio_storage import (
+    DocumentStorageError,
+    MinioDocumentStorageClient,
+)
+from assistant_service.services.pdf_document_summary import PdfDocumentSummaryService
 from assistant_service.services.redis_state import RedisStateStore
 from assistant_service.services.retrieval_service import RetrievalService
 
@@ -57,6 +64,9 @@ logger = logging.getLogger(__name__)
 DETERMINE_INTENT_TEXT = "Определяю тип запроса..."
 SEARCH_MATERIALS_TEXT = "Ищу подходящие материалы..."
 GENERATE_ANSWER_TEXT = "Формирую ответ..."
+DETERMINE_DOCUMENT_TEXT = "Определяю выбранный документ."
+PREPARE_DOCUMENT_TEXT = "Подготавливаю документ к обработке."
+GENERATE_SUMMARY_TEXT = "Формирую краткое изложение."
 DELETE_THINK_TEXT = "История диалога очищена."
 SAFE_ERROR_RESPONSE = "Не удалось обработать запрос. Попробуйте ещё раз."
 NO_RETRIEVAL_PROMPT_MARKUP = "ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n\nКОНТЕКСТ:\n"
@@ -81,6 +91,8 @@ class TaskOrchestrator:
         answer_agent: AnswerAgent,
         document_summary_agent: DocumentSummaryAgent,
         retrieval_service: RetrievalService,
+        document_storage: MinioDocumentStorageClient,
+        pdf_summary_service: PdfDocumentSummaryService,
         redis_state: RedisStateStore,
         max_user_prompt_chars: int,
         max_chunk_chars: int,
@@ -102,6 +114,8 @@ class TaskOrchestrator:
         self._answer_agent = answer_agent
         self._document_summary_agent = document_summary_agent
         self._retrieval_service = retrieval_service
+        self._document_storage = document_storage
+        self._pdf_summary_service = pdf_summary_service
         self._redis_state = redis_state
         self._max_user_prompt_chars = max_user_prompt_chars
         self._max_chunk_chars = max_chunk_chars
@@ -158,7 +172,7 @@ class TaskOrchestrator:
             return
 
         logger.info(
-            "Task orchestrator received request: document_uid_present=%s",
+            "Task orchestrator received request: has_document=%s",
             message.uid is not None,
         )
         await self._redis_state.set_task_status(
@@ -173,7 +187,7 @@ class TaskOrchestrator:
 
         intent_decision = await self._detect_intent(message)
         logger.info(
-            "Intent detected: task_type=%s selection_source=%s document_uid_present=%s",
+            "Intent detected: task_type=%s selection_source=%s has_document=%s",
             intent_decision.task_type.value,
             intent_decision.source,
             message.uid is not None,
@@ -187,11 +201,7 @@ class TaskOrchestrator:
             return
 
         if intent_decision.task_type == IntentTaskType.SUMMARIZE_DOCUMENT:
-            await self._publish_response(
-                user_id=message.user_id,
-                data=build_summary_requires_complete_document_response(),
-                warning=warning,
-            )
+            await self._handle_summary_document(message=message, warning=warning)
             return
 
         if not intent_decision.keywords:
@@ -327,6 +337,118 @@ class TaskOrchestrator:
             warning=generation_warning,
         )
 
+    async def _handle_summary_document(
+        self,
+        *,
+        message: PromptRequestMessage,
+        warning: int,
+    ) -> None:
+        if message.uid is None:
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_summary_requires_complete_document_response(),
+                warning=warning,
+            )
+            return
+
+        await self._publish_think(
+            user_id=message.user_id,
+            data=DETERMINE_DOCUMENT_TEXT,
+            status=LLMStatus.SEARCHING,
+        )
+        try:
+            metadata = await self._retrieval_service.get_document_metadata(
+                uid=message.uid,
+            )
+        except EXPECTED_RETRIEVAL_ERRORS as exc:
+            logger.warning(
+                "Summary metadata lookup failed: task_type=%s error_type=%s",
+                IntentTaskType.SUMMARIZE_DOCUMENT.value,
+                type(exc).__name__,
+            )
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_document_summary_unavailable_response(),
+                warning=warning,
+            )
+            return
+
+        if metadata is None or metadata.file_name.strip() == "":
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_document_summary_unavailable_response(),
+                warning=warning,
+            )
+            return
+
+        if self._document_extension(metadata.file_name) != "pdf":
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_pdf_only_summary_response(),
+                warning=warning,
+            )
+            return
+
+        await self._publish_think(
+            user_id=message.user_id,
+            data=PREPARE_DOCUMENT_TEXT,
+            status=LLMStatus.SEARCHING,
+        )
+        try:
+            pdf_bytes = await self._document_storage.download_pdf_for_summary(
+                user_id=message.user_id,
+                document_id=message.uid,
+            )
+        except DocumentStorageError as exc:
+            logger.warning(
+                "Summary document download failed: operation=%s format=%s error_type=%s",
+                "download",
+                "pdf",
+                type(exc).__name__,
+            )
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_document_summary_unavailable_response(),
+                warning=warning,
+            )
+            return
+
+        await self._publish_think(
+            user_id=message.user_id,
+            data=GENERATE_SUMMARY_TEXT,
+            status=LLMStatus.GENERATING,
+        )
+        try:
+            summary_text = await self._pdf_summary_service.summarize_pdf(
+                pdf_bytes=pdf_bytes,
+            )
+        except GeminiRateLimitError:
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_gemini_rate_limit_response(),
+                warning=warning,
+            )
+            return
+        except (GeminiRequestLimitError, GeminiTransientError, GeminiPermanentError) as exc:
+            logger.warning(
+                "Summary generation failed: operation=%s format=%s error_type=%s",
+                "files_api_summary",
+                "pdf",
+                type(exc).__name__,
+            )
+            await self._publish_response(
+                user_id=message.user_id,
+                data=build_document_summary_unavailable_response(),
+                warning=warning,
+            )
+            return
+
+        await self._publish_response(
+            user_id=message.user_id,
+            data=summary_text,
+            warning=warning,
+        )
+
     async def _handle_delete(self, message: DeleteRequestMessage) -> None:
         logger.info(
             "Task orchestrator received delete",
@@ -407,6 +529,13 @@ class TaskOrchestrator:
             return True
 
         return any(len(chunk.text) > self._max_chunk_chars for chunk in chunks)
+
+    @staticmethod
+    def _document_extension(file_name: str) -> str:
+        stripped_name = file_name.strip()
+        if "." not in stripped_name:
+            return ""
+        return stripped_name.rsplit(".", 1)[-1].lower()
 
     @staticmethod
     def _assistant_mode_for_task(task_type: IntentTaskType) -> AssistantMode:

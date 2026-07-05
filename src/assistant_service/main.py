@@ -18,6 +18,11 @@ from assistant_service.services.gemini_client import (
     GeminiClient,
     create_gemini_client_from_settings,
 )
+from assistant_service.services.minio_storage import (
+    MinioDocumentStorageClient,
+    create_minio_document_storage_from_settings,
+)
+from assistant_service.services.pdf_document_summary import PdfDocumentSummaryService
 from assistant_service.services.redis_state import (
     RedisStateStore,
     create_redis_state_store_from_settings,
@@ -53,11 +58,13 @@ async def run_worker() -> None:
     gemini_client: GeminiClient | None = None
     redis_state: RedisStateStore | None = None
     elasticsearch_client: ElasticsearchClient | None = None
+    document_storage: MinioDocumentStorageClient | None = None
     context_agent = ContextAgent()
     try:
         gemini_client = create_gemini_client_from_settings(settings)
         redis_state = create_redis_state_store_from_settings(settings)
         elasticsearch_client = create_elasticsearch_client_from_settings(settings)
+        document_storage = create_minio_document_storage_from_settings(settings)
         retrieval_service = RetrievalService(
             search_client=elasticsearch_client,
             redis_state=redis_state,
@@ -69,6 +76,7 @@ async def run_worker() -> None:
             max_chunk_chars=settings.gemini_max_chunk_chars,
             max_prompt_chars=settings.gemini_max_prompt_chars,
         )
+        pdf_summary_service = PdfDocumentSummaryService(text_generator=gemini_client)
         orchestrator = TaskOrchestrator(
             publisher=worker,
             intent_agent=intent_agent,
@@ -76,6 +84,8 @@ async def run_worker() -> None:
             answer_agent=answer_agent,
             document_summary_agent=document_summary_agent,
             retrieval_service=retrieval_service,
+            document_storage=document_storage,
+            pdf_summary_service=pdf_summary_service,
             redis_state=redis_state,
             max_user_prompt_chars=settings.gemini_max_user_prompt_chars,
             max_chunk_chars=settings.gemini_max_chunk_chars,

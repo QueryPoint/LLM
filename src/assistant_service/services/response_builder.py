@@ -45,6 +45,10 @@ UNSUPPORTED_REQUEST_RESPONSE = (
 RETRIEVAL_UNAVAILABLE_RESPONSE = (
     "Не удалось выполнить поиск по базе знаний. Попробуйте позже."
 )
+PDF_ONLY_SUMMARY_RESPONSE = "Краткое изложение пока доступно только для PDF-документов."
+DOCUMENT_SUMMARY_UNAVAILABLE_RESPONSE = (
+    "Не удалось подготовить краткое изложение документа. Попробуйте позже."
+)
 
 
 def build_response_text(mode: AssistantMode, context_decision: ContextDecision) -> str:
@@ -103,6 +107,14 @@ def build_unsupported_request_response() -> str:
 
 def build_retrieval_unavailable_response() -> str:
     return RETRIEVAL_UNAVAILABLE_RESPONSE
+
+
+def build_pdf_only_summary_response() -> str:
+    return PDF_ONLY_SUMMARY_RESPONSE
+
+
+def build_document_summary_unavailable_response() -> str:
+    return DOCUMENT_SUMMARY_UNAVAILABLE_RESPONSE
 
 
 def _build_document_search_response(context_decision: ContextDecision) -> str:
