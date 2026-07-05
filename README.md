@@ -106,30 +106,50 @@ text
 user_id
 ```
 
-`user_id` не используется как Elasticsearch filter в текущем sprint. Проверку
-доступа пользователя выполняет backend до отправки RabbitMQ message.
+LLM-service дополнительно применяет `user_id` filter к каждому Elasticsearch
+retrieval и metadata lookup. Backend access checks являются только первым
+уровнем изоляции.
 
-Если `doc` отсутствует, выполняется global search по `text`:
-
-```json
-{
-  "query": {
-    "match": {
-      "text": {
-        "query": "нормализация базы данных"
-      }
-    }
-  }
-}
-```
-
-Если `doc` передан, поиск ограничивается документом через точный filter:
+Если `doc` отсутствует, поиск ограничивается документами текущего пользователя:
 
 ```json
 {
   "query": {
     "bool": {
       "filter": [
+        {
+          "term": {
+            "user_id": "user-123"
+          }
+        }
+      ],
+      "must": [
+        {
+          "match": {
+            "text": {
+              "query": "нормализация базы данных"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Если `doc` передан, поиск ограничивается одновременно пользователем и
+документом:
+
+```json
+{
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "term": {
+            "user_id": "user-123"
+          }
+        },
         {
           "term": {
             "doc_id": "document-id-123"
@@ -155,7 +175,8 @@ Query text строится только из `IntentDecision.keywords`. Raw use
 
 Найденные `SearchResult` кэшируются в Redis с TTL 900 секунд. Пустые
 результаты не кэшируются, а повреждённый cache entry удаляется best effort и
-обрабатывается как cache miss.
+обрабатывается как cache miss. Redis retrieval keys используют tenant scope
+hash, поэтому `user_id` не хранится в raw виде и не логируется.
 
 ## Grounded Answer Flow
 

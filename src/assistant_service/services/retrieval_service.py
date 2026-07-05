@@ -23,6 +23,7 @@ class SearchClient(Protocol):
         self,
         *,
         query_text: str,
+        user_id: str,
         document_id: str | None,
     ) -> tuple[SearchResult, ...]:
         ...
@@ -30,6 +31,7 @@ class SearchClient(Protocol):
     async def get_document_metadata(
         self,
         *,
+        user_id: str,
         document_id: str,
     ) -> DocumentMetadata | None:
         ...
@@ -48,16 +50,19 @@ class RetrievalService:
         self,
         *,
         intent_decision: IntentDecision,
+        user_id: str,
         document_id: str | None,
     ) -> tuple[SearchResult, ...]:
         normalized_keywords = normalize_retrieval_keywords(intent_decision.keywords)
         query_text = " ".join(normalized_keywords).strip()
-        if query_text == "":
+        normalized_user_id = user_id.strip()
+        if query_text == "" or normalized_user_id == "":
             return ()
 
         cache_key = build_retrieval_cache_key(
             index_name=self._search_client.index_name,
             keywords=normalized_keywords,
+            user_id=normalized_user_id,
             document_id=document_id,
         )
         cached_results = await self._get_cached_results(cache_key)
@@ -68,11 +73,13 @@ class RetrievalService:
         logger.info("Retrieval cache lookup: cache_hit=%s", False)
         results = await self._search_client.search(
             query_text=query_text,
+            user_id=normalized_user_id,
             document_id=document_id,
         )
         if results:
             await self.cache_results(
                 intent_decision=intent_decision,
+                user_id=normalized_user_id,
                 document_id=document_id,
                 results=results,
             )
@@ -81,9 +88,14 @@ class RetrievalService:
     async def get_document_metadata(
         self,
         *,
+        user_id: str,
         document_id: str,
     ) -> DocumentMetadata | None:
+        if user_id.strip() == "" or document_id.strip() == "":
+            return None
+
         return await self._search_client.get_document_metadata(
+            user_id=user_id,
             document_id=document_id,
         )
 
@@ -103,6 +115,7 @@ class RetrievalService:
         self,
         *,
         intent_decision: IntentDecision,
+        user_id: str,
         document_id: str | None,
         results: tuple[SearchResult, ...],
     ) -> None:
@@ -113,6 +126,7 @@ class RetrievalService:
         cache_key = build_retrieval_cache_key(
             index_name=self._search_client.index_name,
             keywords=normalized_keywords,
+            user_id=user_id,
             document_id=document_id,
         )
         await self._redis_state.set_retrieval_cache_payload(

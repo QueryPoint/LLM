@@ -12,6 +12,7 @@ def build_retrieval_cache_key(
     *,
     index_name: str,
     keywords: Sequence[str],
+    user_id: str,
     document_id: str | None,
 ) -> str:
     normalized_index_name = index_name.strip()
@@ -20,10 +21,12 @@ def build_retrieval_cache_key(
 
     normalized_keywords = _normalize_keywords(keywords)
     normalized_document_id = _normalize_document_id(document_id)
+    normalized_user_scope = _normalize_user_scope(user_id)
     fingerprint = "|".join(
         (
             normalized_index_name,
             " ".join(normalized_keywords),
+            normalized_user_scope,
             normalized_document_id,
         )
     )
@@ -104,6 +107,11 @@ def _normalize_document_id(document_id: str | None) -> str:
 
     normalized_document_id = document_id.strip()
     return normalized_document_id or "global"
+
+
+def _normalize_user_scope(user_id: str) -> str:
+    normalized_user_id = user_id.strip()
+    return hashlib.sha256(normalized_user_id.encode("utf-8")).hexdigest()
 
 
 def _deserialize_search_result(raw_result: object) -> SearchResult | None:

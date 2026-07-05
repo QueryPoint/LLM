@@ -79,14 +79,17 @@ class ElasticsearchClient:
         self,
         *,
         query_text: str,
+        user_id: str,
         document_id: str | None,
     ) -> tuple[SearchResult, ...]:
         normalized_query_text = query_text.strip()
-        if normalized_query_text == "":
+        normalized_user_id = user_id.strip()
+        if normalized_query_text == "" or normalized_user_id == "":
             return ()
 
         query = self._build_query(
             query_text=normalized_query_text,
+            user_id=normalized_user_id,
             document_id=document_id,
         )
         try:
@@ -112,16 +115,25 @@ class ElasticsearchClient:
     async def get_document_metadata(
         self,
         *,
+        user_id: str,
         document_id: str,
     ) -> DocumentMetadata | None:
+        normalized_user_id = user_id.strip()
         normalized_document_id = document_id.strip()
-        if normalized_document_id == "":
+        if normalized_user_id == "" or normalized_document_id == "":
             return None
 
         query = {
             "size": 1,
             "_source": list(METADATA_SOURCE_FIELDS),
-            "query": {"term": {"doc_id": normalized_document_id}},
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"user_id": normalized_user_id}},
+                        {"term": {"doc_id": normalized_document_id}},
+                    ]
+                }
+            },
         }
         try:
             response = await self._client.search(index=self._index_name, body=query)
@@ -150,8 +162,10 @@ class ElasticsearchClient:
         self,
         *,
         query_text: str,
+        user_id: str,
         document_id: str | None,
     ) -> dict[str, object]:
+        normalized_user_id = user_id.strip()
         normalized_document_id = (
             document_id.strip() if isinstance(document_id, str) else None
         )
@@ -162,16 +176,16 @@ class ElasticsearchClient:
         }
 
         match_query = {"match": {"text": {"query": query_text}}}
+        filters: list[dict[str, object]] = [{"term": {"user_id": normalized_user_id}}]
         if normalized_document_id:
-            base_query["query"] = {
-                "bool": {
-                    "filter": [{"term": {"doc_id": normalized_document_id}}],
-                    "must": [match_query],
-                }
-            }
-            return base_query
+            filters.append({"term": {"doc_id": normalized_document_id}})
 
-        base_query["query"] = match_query
+        base_query["query"] = {
+            "bool": {
+                "filter": filters,
+                "must": [match_query],
+            }
+        }
         return base_query
 
     def _normalize_response(self, response: object) -> tuple[SearchResult, ...]:

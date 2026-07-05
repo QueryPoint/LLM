@@ -154,8 +154,8 @@ class FakeRetrievalService:
         metadata: DocumentMetadata | None = None,
         metadata_error: Exception | None = None,
     ) -> None:
-        self.calls: list[tuple[IntentDecision, str | None]] = []
-        self.metadata_calls: list[str] = []
+        self.calls: list[tuple[IntentDecision, str, str | None]] = []
+        self.metadata_calls: list[tuple[str, str]] = []
         self._results = results
         self._error = error
         self._metadata = metadata
@@ -165,9 +165,10 @@ class FakeRetrievalService:
         self,
         *,
         intent_decision: IntentDecision,
+        user_id: str,
         document_id: str | None,
     ) -> tuple[SearchResult, ...]:
-        self.calls.append((intent_decision, document_id))
+        self.calls.append((intent_decision, user_id, document_id))
         if self._error is not None:
             raise self._error
         return self._results
@@ -175,9 +176,10 @@ class FakeRetrievalService:
     async def get_document_metadata(
         self,
         *,
+        user_id: str,
         document_id: str,
     ) -> DocumentMetadata | None:
-        self.metadata_calls.append(document_id)
+        self.metadata_calls.append((user_id, document_id))
         if self._metadata_error is not None:
             raise self._metadata_error
         return self._metadata
@@ -332,7 +334,7 @@ def test_empty_retrieval_publishes_materials_not_found_without_answer_agent() ->
     assert publisher.events[2].warning > 0
     assert intent_agent.calls == [("Объясни нормализацию баз данных", DOCUMENT_ID)]
     assert len(retrieval_service.calls) == 1
-    assert retrieval_service.calls[0][1] == DOCUMENT_ID
+    assert retrieval_service.calls[0][1:] == (USER_ID, DOCUMENT_ID)
     assert len(context_agent.calls) == 1
     assert answer_agent.calls == []
     assert document_summary_agent.calls == []
@@ -405,6 +407,8 @@ def test_found_context_invokes_answer_agent_once_with_single_response() -> None:
     assert context_agent.calls[0][1] == AssistantMode.EXPLAIN_TOPIC
     assert len(answer_agent.build_calls) == 1
     assert len(answer_agent.calls) == 1
+    assert len(retrieval_service.calls) == 1
+    assert retrieval_service.calls[0][1:] == (USER_ID, DOCUMENT_ID)
 
 
 def test_summary_intent_returns_full_document_fallback_without_summary_agent() -> None:
@@ -454,7 +458,7 @@ def test_summary_missing_metadata_returns_controlled_fallback_without_minio_or_g
 
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_document_summary_unavailable_response()
-    assert retrieval_service.metadata_calls == [DOCUMENT_ID]
+    assert retrieval_service.metadata_calls == [(USER_ID, DOCUMENT_ID)]
     assert document_storage.calls == []
     assert pdf_summary_service.calls == []
 
@@ -481,7 +485,7 @@ def test_summary_non_pdf_metadata_returns_pdf_only_fallback_without_minio_or_gem
 
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_pdf_only_summary_response()
-    assert retrieval_service.metadata_calls == [DOCUMENT_ID]
+    assert retrieval_service.metadata_calls == [(USER_ID, DOCUMENT_ID)]
     assert document_storage.calls == []
     assert pdf_summary_service.calls == []
 
@@ -517,7 +521,7 @@ def test_summary_pdf_flow_returns_gemini_summary_with_single_response() -> None:
     ]
     assert len(response_events) == 1
     assert response_events[0].data == "Структурированное изложение"
-    assert retrieval_service.metadata_calls == [DOCUMENT_ID]
+    assert retrieval_service.metadata_calls == [(USER_ID, DOCUMENT_ID)]
     assert document_storage.calls == [(USER_ID, DOCUMENT_ID)]
     assert pdf_summary_service.calls == [b"%PDF-1.4 content"]
 
@@ -557,7 +561,41 @@ def test_summary_minio_error_returns_controlled_fallback_without_requeue(caplog:
     assert "%PDF" not in caplog.text
 
 
-def test_expected_elasticsearch_error_returns_retrieval_unavailable_response() -> None:
+def test_summary_metadata_lookup_failure_uses_neutral_fallback_without_sensitive_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    publisher = FakePublisher()
+    intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
+    retrieval_service = FakeRetrievalService(
+        metadata_error=ElasticsearchUnavailableError("unavailable")
+    )
+    document_storage = FakeDocumentStorage()
+    pdf_summary_service = FakePdfSummaryService()
+    orchestrator = _orchestrator(
+        publisher=publisher,
+        intent_agent=intent_agent,
+        retrieval_service=retrieval_service,
+        document_storage=document_storage,
+        pdf_summary_service=pdf_summary_service,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            orchestrator.handle(_prompt_message(prompt="Сделай summary", doc=DOCUMENT_ID))
+        )
+
+    assert publisher.events[-1].type == OutgoingEventType.RESPONSE
+    assert publisher.events[-1].data == build_document_summary_unavailable_response()
+    assert retrieval_service.metadata_calls == [(USER_ID, DOCUMENT_ID)]
+    assert USER_ID not in caplog.text
+    assert DOCUMENT_ID not in caplog.text
+    assert "Сделай summary" not in caplog.text
+    assert "lecture.pdf" not in caplog.text
+
+
+def test_expected_elasticsearch_error_returns_retrieval_unavailable_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     publisher = FakePublisher()
     answer_agent = FakeAnswerAgent()
     retrieval_service = FakeRetrievalService(
@@ -569,11 +607,16 @@ def test_expected_elasticsearch_error_returns_retrieval_unavailable_response() -
         retrieval_service=retrieval_service,
     )
 
-    asyncio.run(orchestrator.handle(_prompt_message()))
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(orchestrator.handle(_prompt_message()))
 
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_retrieval_unavailable_response()
     assert answer_agent.calls == []
+    assert USER_ID not in caplog.text
+    assert DOCUMENT_ID not in caplog.text
+    assert "Объясни нормализацию баз данных" not in caplog.text
+    assert "query" not in caplog.text
 
 
 def test_prompt_budget_boundary_returns_context_too_large_without_agents() -> None:

@@ -7,6 +7,7 @@ from assistant_service.services.cache_keys import (
     build_answer_cache_key,
     build_intent_cache_key,
 )
+from assistant_service.services.retrieval_cache import build_retrieval_cache_key
 
 
 USER_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -83,3 +84,35 @@ def test_cache_keys_are_deterministic_and_do_not_expose_plaintext() -> None:
     assert intent_key == same_intent_key
     assert intent_key != changed_document_id_key
     assert intent_key.startswith("intent:v1:")
+
+    retrieval_key = build_retrieval_cache_key(
+        index_name="documents",
+        keywords=("Redis", "cache"),
+        user_id=str(USER_ID),
+        document_id="document-id-123",
+    )
+    same_retrieval_key = build_retrieval_cache_key(
+        index_name="documents",
+        keywords=("Redis", "cache"),
+        user_id=str(USER_ID),
+        document_id="document-id-123",
+    )
+    different_user_retrieval_key = build_retrieval_cache_key(
+        index_name="documents",
+        keywords=("Redis", "cache"),
+        user_id=str(OTHER_USER_ID),
+        document_id="document-id-123",
+    )
+    different_document_retrieval_key = build_retrieval_cache_key(
+        index_name="documents",
+        keywords=("Redis", "cache"),
+        user_id=str(USER_ID),
+        document_id="another-document",
+    )
+
+    assert retrieval_key == same_retrieval_key
+    assert retrieval_key != different_user_retrieval_key
+    assert retrieval_key != different_document_retrieval_key
+    assert retrieval_key.startswith("retrieval:v1:")
+    assert str(USER_ID) not in retrieval_key
+    assert str(OTHER_USER_ID) not in retrieval_key

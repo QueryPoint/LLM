@@ -225,6 +225,7 @@ class TaskOrchestrator:
         try:
             search_results = await self._retrieval_service.search(
                 intent_decision=intent_decision,
+                user_id=message.user_id,
                 document_id=document_id,
             )
         except EXPECTED_RETRIEVAL_ERRORS as exc:
@@ -360,6 +361,7 @@ class TaskOrchestrator:
         )
         try:
             metadata = await self._retrieval_service.get_document_metadata(
+                user_id=message.user_id,
                 document_id=document_id,
             )
         except EXPECTED_RETRIEVAL_ERRORS as exc:

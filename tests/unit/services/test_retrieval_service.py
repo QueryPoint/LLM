@@ -11,6 +11,9 @@ from assistant_service.services.retrieval_cache import (
 from assistant_service.services.retrieval_service import RetrievalService
 from assistant_service.services.redis_state import RedisStateStore
 
+USER_ID = "user-123"
+OTHER_USER_ID = "user-456"
+
 
 class FakeRedisClient:
     def __init__(
@@ -89,12 +92,27 @@ class FakeSearchClient:
         self,
         *,
         query_text: str,
+        user_id: str,
         document_id: str | None,
     ) -> tuple[SearchResult, ...]:
-        self.calls.append({"query_text": query_text, "document_id": document_id})
+        self.calls.append(
+            {
+                "query_text": query_text,
+                "user_id": user_id,
+                "document_id": document_id,
+            }
+        )
         if self._error is not None:
             raise self._error
         return self._results
+
+    async def get_document_metadata(
+        self,
+        *,
+        user_id: str,
+        document_id: str,
+    ) -> object | None:
+        return None
 
 
 def _result() -> SearchResult:
@@ -136,6 +154,7 @@ def test_retrieval_cache_hit_returns_deserialized_results_without_es() -> None:
     cache_key = build_retrieval_cache_key(
         index_name="documents",
         keywords=("нормализация", "база данных"),
+        user_id=USER_ID,
         document_id=None,
     )
     fake_redis.values[cache_key] = serialize_search_results((_result(),))
@@ -143,7 +162,11 @@ def test_retrieval_cache_hit_returns_deserialized_results_without_es() -> None:
     service = RetrievalService(search_client, _store(fake_redis))
 
     results = asyncio.run(
-        service.search(intent_decision=_intent_decision(), document_id=None)
+        service.search(
+            intent_decision=_intent_decision(),
+            user_id=USER_ID,
+            document_id=None,
+        )
     )
 
     assert results == (_result(),)
@@ -159,12 +182,14 @@ def test_retrieval_cache_miss_calls_es_and_stores_results() -> None:
     results = asyncio.run(
         service.search(
             intent_decision=_intent_decision(),
+            user_id=USER_ID,
             document_id="document-id-123",
         )
     )
 
     assert results == search_result
     assert len(search_client.calls) == 1
+    assert search_client.calls[0]["user_id"] == USER_ID
     assert fake_redis.set_calls[0]["ex"] == 900
 
 
@@ -175,7 +200,11 @@ def test_retrieval_cache_fail_open_on_redis_error() -> None:
     service = RetrievalService(search_client, _store(fake_redis))
 
     results = asyncio.run(
-        service.search(intent_decision=_intent_decision(), document_id=None)
+        service.search(
+            intent_decision=_intent_decision(),
+            user_id=USER_ID,
+            document_id=None,
+        )
     )
 
     assert results == search_result
@@ -187,6 +216,7 @@ def test_invalid_cached_payload_is_deleted_and_replaced() -> None:
     cache_key = build_retrieval_cache_key(
         index_name="documents",
         keywords=("нормализация", "база данных"),
+        user_id=USER_ID,
         document_id=None,
     )
     fake_redis.values[cache_key] = "{broken-json"
@@ -195,7 +225,11 @@ def test_invalid_cached_payload_is_deleted_and_replaced() -> None:
     service = RetrievalService(search_client, _store(fake_redis))
 
     results = asyncio.run(
-        service.search(intent_decision=_intent_decision(), document_id=None)
+        service.search(
+            intent_decision=_intent_decision(),
+            user_id=USER_ID,
+            document_id=None,
+        )
     )
 
     assert results == search_result
@@ -209,7 +243,11 @@ def test_empty_results_do_not_write_cache_and_keys_change_with_inputs() -> None:
     service = RetrievalService(search_client, _store(fake_redis))
 
     results = asyncio.run(
-        service.search(intent_decision=_intent_decision(), document_id=None)
+        service.search(
+            intent_decision=_intent_decision(),
+            user_id=USER_ID,
+            document_id=None,
+        )
     )
 
     assert results == ()
@@ -218,20 +256,30 @@ def test_empty_results_do_not_write_cache_and_keys_change_with_inputs() -> None:
     base_key = build_retrieval_cache_key(
         index_name="documents",
         keywords=("нормализация", "база данных"),
+        user_id=USER_ID,
         document_id=None,
     )
     assert base_key != build_retrieval_cache_key(
         index_name="other-index",
         keywords=("нормализация", "база данных"),
+        user_id=USER_ID,
         document_id=None,
     )
     assert base_key != build_retrieval_cache_key(
         index_name="documents",
         keywords=("другие", "слова"),
+        user_id=USER_ID,
         document_id=None,
     )
     assert base_key != build_retrieval_cache_key(
         index_name="documents",
         keywords=("нормализация", "база данных"),
+        user_id=USER_ID,
         document_id="document-id-123",
+    )
+    assert base_key != build_retrieval_cache_key(
+        index_name="documents",
+        keywords=("нормализация", "база данных"),
+        user_id=OTHER_USER_ID,
+        document_id=None,
     )
