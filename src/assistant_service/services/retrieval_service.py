@@ -23,11 +23,15 @@ class SearchClient(Protocol):
         self,
         *,
         query_text: str,
-        uid: str | None,
+        document_id: str | None,
     ) -> tuple[SearchResult, ...]:
         ...
 
-    async def get_document_metadata(self, *, uid: str) -> DocumentMetadata | None:
+    async def get_document_metadata(
+        self,
+        *,
+        document_id: str,
+    ) -> DocumentMetadata | None:
         ...
 
 
@@ -44,7 +48,7 @@ class RetrievalService:
         self,
         *,
         intent_decision: IntentDecision,
-        uid: str | None,
+        document_id: str | None,
     ) -> tuple[SearchResult, ...]:
         normalized_keywords = normalize_retrieval_keywords(intent_decision.keywords)
         query_text = " ".join(normalized_keywords).strip()
@@ -54,7 +58,7 @@ class RetrievalService:
         cache_key = build_retrieval_cache_key(
             index_name=self._search_client.index_name,
             keywords=normalized_keywords,
-            uid=uid,
+            document_id=document_id,
         )
         cached_results = await self._get_cached_results(cache_key)
         if cached_results is not None:
@@ -62,17 +66,26 @@ class RetrievalService:
             return cached_results
 
         logger.info("Retrieval cache lookup: cache_hit=%s", False)
-        results = await self._search_client.search(query_text=query_text, uid=uid)
+        results = await self._search_client.search(
+            query_text=query_text,
+            document_id=document_id,
+        )
         if results:
             await self.cache_results(
                 intent_decision=intent_decision,
-                uid=uid,
+                document_id=document_id,
                 results=results,
             )
         return results
 
-    async def get_document_metadata(self, *, uid: str) -> DocumentMetadata | None:
-        return await self._search_client.get_document_metadata(uid=uid)
+    async def get_document_metadata(
+        self,
+        *,
+        document_id: str,
+    ) -> DocumentMetadata | None:
+        return await self._search_client.get_document_metadata(
+            document_id=document_id,
+        )
 
     async def _get_cached_results(self, cache_key: str) -> tuple[SearchResult, ...] | None:
         raw_payload = await self._redis_state.get_retrieval_cache_payload(key=cache_key)
@@ -90,7 +103,7 @@ class RetrievalService:
         self,
         *,
         intent_decision: IntentDecision,
-        uid: str | None,
+        document_id: str | None,
         results: tuple[SearchResult, ...],
     ) -> None:
         if not results:
@@ -100,7 +113,7 @@ class RetrievalService:
         cache_key = build_retrieval_cache_key(
             index_name=self._search_client.index_name,
             keywords=normalized_keywords,
-            uid=uid,
+            document_id=document_id,
         )
         await self._redis_state.set_retrieval_cache_payload(
             key=cache_key,

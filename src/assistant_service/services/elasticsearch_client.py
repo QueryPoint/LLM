@@ -79,13 +79,16 @@ class ElasticsearchClient:
         self,
         *,
         query_text: str,
-        uid: str | None,
+        document_id: str | None,
     ) -> tuple[SearchResult, ...]:
         normalized_query_text = query_text.strip()
         if normalized_query_text == "":
             return ()
 
-        query = self._build_query(query_text=normalized_query_text, uid=uid)
+        query = self._build_query(
+            query_text=normalized_query_text,
+            document_id=document_id,
+        )
         try:
             response = await self._client.search(index=self._index_name, body=query)
         except NotFoundError as exc:
@@ -106,15 +109,19 @@ class ElasticsearchClient:
 
         return self._normalize_response(response)
 
-    async def get_document_metadata(self, *, uid: str) -> DocumentMetadata | None:
-        normalized_uid = uid.strip()
-        if normalized_uid == "":
+    async def get_document_metadata(
+        self,
+        *,
+        document_id: str,
+    ) -> DocumentMetadata | None:
+        normalized_document_id = document_id.strip()
+        if normalized_document_id == "":
             return None
 
         query = {
             "size": 1,
             "_source": list(METADATA_SOURCE_FIELDS),
-            "query": {"term": {"doc_id": normalized_uid}},
+            "query": {"term": {"doc_id": normalized_document_id}},
         }
         try:
             response = await self._client.search(index=self._index_name, body=query)
@@ -139,8 +146,15 @@ class ElasticsearchClient:
     async def aclose(self) -> None:
         await self._client.close()
 
-    def _build_query(self, *, query_text: str, uid: str | None) -> dict[str, object]:
-        normalized_uid = uid.strip() if isinstance(uid, str) else None
+    def _build_query(
+        self,
+        *,
+        query_text: str,
+        document_id: str | None,
+    ) -> dict[str, object]:
+        normalized_document_id = (
+            document_id.strip() if isinstance(document_id, str) else None
+        )
         base_query: dict[str, object] = {
             "size": self._max_results,
             "_source": list(SOURCE_FIELDS),
@@ -148,10 +162,10 @@ class ElasticsearchClient:
         }
 
         match_query = {"match": {"text": {"query": query_text}}}
-        if normalized_uid:
+        if normalized_document_id:
             base_query["query"] = {
                 "bool": {
-                    "filter": [{"term": {"doc_id": normalized_uid}}],
+                    "filter": [{"term": {"doc_id": normalized_document_id}}],
                     "must": [match_query],
                 }
             }

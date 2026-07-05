@@ -45,7 +45,7 @@ MAX_USER_PROMPT_CHARS = 4_000
 MAX_CHUNK_CHARS = 12_000
 MAX_CHUNKS_PER_REQUEST = 32
 MAX_PROMPT_CHARS = 16_000
-DOCUMENT_UID = "document-uid-123"
+DOCUMENT_ID = "document-id-123"
 
 
 class FakePublisher:
@@ -78,8 +78,8 @@ class FakeIntentAgent:
         self._fail = fail
         self._task_type = task_type
 
-    async def detect(self, prompt: str, uid: str | None) -> IntentDecision:
-        self.calls.append((prompt, uid))
+    async def detect(self, prompt: str, document_id: str | None) -> IntentDecision:
+        self.calls.append((prompt, document_id))
         if self._fail:
             raise RuntimeError("intent detection failed")
         return IntentDecision(
@@ -165,15 +165,19 @@ class FakeRetrievalService:
         self,
         *,
         intent_decision: IntentDecision,
-        uid: str | None,
+        document_id: str | None,
     ) -> tuple[SearchResult, ...]:
-        self.calls.append((intent_decision, uid))
+        self.calls.append((intent_decision, document_id))
         if self._error is not None:
             raise self._error
         return self._results
 
-    async def get_document_metadata(self, *, uid: str) -> DocumentMetadata | None:
-        self.metadata_calls.append(uid)
+    async def get_document_metadata(
+        self,
+        *,
+        document_id: str,
+    ) -> DocumentMetadata | None:
+        self.metadata_calls.append(document_id)
         if self._metadata_error is not None:
             raise self._metadata_error
         return self._metadata
@@ -228,14 +232,14 @@ class FakeRedisState:
 def _prompt_message(
     *,
     prompt: str = "Объясни нормализацию баз данных",
-    uid: str | None = None,
+    doc: str | None = None,
 ) -> IncomingMessage:
     return incoming_message_adapter.validate_python(
         {
             "type": "prompt",
             "user_id": USER_ID,
             "prompt": prompt,
-            "uid": uid,
+            "doc": doc,
         }
     )
 
@@ -285,7 +289,7 @@ def _search_result(
     text: str = "Нормализация уменьшает избыточность данных.",
 ) -> SearchResult:
     return SearchResult(
-        doc_id=DOCUMENT_UID,
+        doc_id=DOCUMENT_ID,
         chunk_id="chunk-1",
         file_name="lecture.pdf",
         page_number=5,
@@ -314,7 +318,7 @@ def test_empty_retrieval_publishes_materials_not_found_without_answer_agent() ->
         max_prompt_chars=100,
     )
 
-    asyncio.run(orchestrator.handle(_prompt_message(uid=DOCUMENT_UID)))
+    asyncio.run(orchestrator.handle(_prompt_message(doc=DOCUMENT_ID)))
 
     assert [event.type for event in publisher.events] == [
         OutgoingEventType.THINK,
@@ -326,9 +330,9 @@ def test_empty_retrieval_publishes_materials_not_found_without_answer_agent() ->
     assert isinstance(publisher.events[0].data, str)
     assert publisher.events[2].data == build_materials_not_found_response()
     assert publisher.events[2].warning > 0
-    assert intent_agent.calls == [("Объясни нормализацию баз данных", DOCUMENT_UID)]
+    assert intent_agent.calls == [("Объясни нормализацию баз данных", DOCUMENT_ID)]
     assert len(retrieval_service.calls) == 1
-    assert retrieval_service.calls[0][1] == DOCUMENT_UID
+    assert retrieval_service.calls[0][1] == DOCUMENT_ID
     assert len(context_agent.calls) == 1
     assert answer_agent.calls == []
     assert document_summary_agent.calls == []
@@ -384,7 +388,7 @@ def test_found_context_invokes_answer_agent_once_with_single_response() -> None:
         retrieval_service=retrieval_service,
     )
 
-    asyncio.run(orchestrator.handle(_prompt_message(uid=DOCUMENT_UID)))
+    asyncio.run(orchestrator.handle(_prompt_message(doc=DOCUMENT_ID)))
 
     assert [event.data for event in publisher.events if event.type == OutgoingEventType.THINK] == [
         DETERMINE_INTENT_TEXT,
@@ -444,11 +448,13 @@ def test_summary_missing_metadata_returns_controlled_fallback_without_minio_or_g
         pdf_summary_service=pdf_summary_service,
     )
 
-    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID)))
+    asyncio.run(
+        orchestrator.handle(_prompt_message(prompt="Сделай summary", doc=DOCUMENT_ID))
+    )
 
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_document_summary_unavailable_response()
-    assert retrieval_service.metadata_calls == [DOCUMENT_UID]
+    assert retrieval_service.metadata_calls == [DOCUMENT_ID]
     assert document_storage.calls == []
     assert pdf_summary_service.calls == []
 
@@ -457,7 +463,7 @@ def test_summary_non_pdf_metadata_returns_pdf_only_fallback_without_minio_or_gem
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
     retrieval_service = FakeRetrievalService(
-        metadata=DocumentMetadata(doc_id=DOCUMENT_UID, file_name="lecture.docx")
+        metadata=DocumentMetadata(doc_id=DOCUMENT_ID, file_name="lecture.docx")
     )
     document_storage = FakeDocumentStorage()
     pdf_summary_service = FakePdfSummaryService()
@@ -469,11 +475,13 @@ def test_summary_non_pdf_metadata_returns_pdf_only_fallback_without_minio_or_gem
         pdf_summary_service=pdf_summary_service,
     )
 
-    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID)))
+    asyncio.run(
+        orchestrator.handle(_prompt_message(prompt="Сделай summary", doc=DOCUMENT_ID))
+    )
 
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_pdf_only_summary_response()
-    assert retrieval_service.metadata_calls == [DOCUMENT_UID]
+    assert retrieval_service.metadata_calls == [DOCUMENT_ID]
     assert document_storage.calls == []
     assert pdf_summary_service.calls == []
 
@@ -482,7 +490,7 @@ def test_summary_pdf_flow_returns_gemini_summary_with_single_response() -> None:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
     retrieval_service = FakeRetrievalService(
-        metadata=DocumentMetadata(doc_id=DOCUMENT_UID, file_name="lecture.PDF")
+        metadata=DocumentMetadata(doc_id=DOCUMENT_ID, file_name="lecture.PDF")
     )
     document_storage = FakeDocumentStorage(data=b"%PDF-1.4 content")
     pdf_summary_service = FakePdfSummaryService(summary="Структурированное изложение")
@@ -494,7 +502,9 @@ def test_summary_pdf_flow_returns_gemini_summary_with_single_response() -> None:
         pdf_summary_service=pdf_summary_service,
     )
 
-    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID)))
+    asyncio.run(
+        orchestrator.handle(_prompt_message(prompt="Сделай summary", doc=DOCUMENT_ID))
+    )
 
     assert [event.data for event in publisher.events if event.type == OutgoingEventType.THINK] == [
         DETERMINE_INTENT_TEXT,
@@ -507,8 +517,8 @@ def test_summary_pdf_flow_returns_gemini_summary_with_single_response() -> None:
     ]
     assert len(response_events) == 1
     assert response_events[0].data == "Структурированное изложение"
-    assert retrieval_service.metadata_calls == [DOCUMENT_UID]
-    assert document_storage.calls == [(USER_ID, DOCUMENT_UID)]
+    assert retrieval_service.metadata_calls == [DOCUMENT_ID]
+    assert document_storage.calls == [(USER_ID, DOCUMENT_ID)]
     assert pdf_summary_service.calls == [b"%PDF-1.4 content"]
 
 
@@ -518,7 +528,7 @@ def test_summary_minio_error_returns_controlled_fallback_without_requeue(caplog:
     publisher = FakePublisher()
     intent_agent = FakeIntentAgent(task_type=IntentTaskType.SUMMARIZE_DOCUMENT)
     retrieval_service = FakeRetrievalService(
-        metadata=DocumentMetadata(doc_id=DOCUMENT_UID, file_name="lecture.pdf")
+        metadata=DocumentMetadata(doc_id=DOCUMENT_ID, file_name="lecture.pdf")
     )
     document_storage = FakeDocumentStorage(
         error=DocumentStorageUnavailableError("unavailable")
@@ -534,15 +544,15 @@ def test_summary_minio_error_returns_controlled_fallback_without_requeue(caplog:
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(
-            orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID))
+            orchestrator.handle(_prompt_message(prompt="Сделай summary", doc=DOCUMENT_ID))
         )
 
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_document_summary_unavailable_response()
-    assert document_storage.calls == [(USER_ID, DOCUMENT_UID)]
+    assert document_storage.calls == [(USER_ID, DOCUMENT_ID)]
     assert pdf_summary_service.calls == []
     assert USER_ID not in caplog.text
-    assert DOCUMENT_UID not in caplog.text
+    assert DOCUMENT_ID not in caplog.text
     assert "lecture.pdf" not in caplog.text
     assert "%PDF" not in caplog.text
 

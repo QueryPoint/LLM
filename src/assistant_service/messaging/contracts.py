@@ -40,7 +40,7 @@ class PromptRequestMessage(StrictBaseModel):
     type: Literal[IncomingMessageType.PROMPT]
     user_id: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
-    uid: str | None = None
+    doc: str | None = None
 
     @field_validator("user_id", "prompt", mode="before")
     @classmethod
@@ -49,9 +49,9 @@ class PromptRequestMessage(StrictBaseModel):
             return value.strip()
         return value
 
-    @field_validator("uid", mode="before")
+    @field_validator("doc", mode="before")
     @classmethod
-    def _strip_optional_uid(cls, value: object) -> object:
+    def _strip_optional_doc(cls, value: object) -> object:
         if isinstance(value, str):
             stripped_value = value.strip()
             return stripped_value or None

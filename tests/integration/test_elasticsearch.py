@@ -14,9 +14,9 @@ def test_elasticsearch_metadata_lookup_reads_existing_document_metadata() -> Non
     if os.getenv("RUN_INTEGRATION_TESTS", "").strip().lower() != "true":
         pytest.skip("integration tests are disabled")
 
-    document_uid = os.getenv("INTEGRATION_DOCUMENT_UID", "").strip()
-    if document_uid == "":
-        pytest.skip("INTEGRATION_DOCUMENT_UID is not set")
+    document_id = os.getenv("INTEGRATION_DOCUMENT_ID", "").strip()
+    if document_id == "":
+        pytest.skip("INTEGRATION_DOCUMENT_ID is not set")
 
     settings = Settings()
     client = AsyncElasticsearch(
@@ -30,7 +30,7 @@ def test_elasticsearch_metadata_lookup_reads_existing_document_metadata() -> Non
     )
 
     async def _run() -> object:
-        return await es_client.get_document_metadata(uid=document_uid)
+        return await es_client.get_document_metadata(document_id=document_id)
 
     try:
         metadata = asyncio.run(_run())
@@ -42,5 +42,5 @@ def test_elasticsearch_metadata_lookup_reads_existing_document_metadata() -> Non
     if metadata is None:
         pytest.skip("test document metadata was not found")
 
-    assert metadata.doc_id == document_uid
+    assert metadata.doc_id == document_id
     assert metadata.file_name.strip() != ""

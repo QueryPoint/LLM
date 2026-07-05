@@ -89,9 +89,9 @@ class FakeSearchClient:
         self,
         *,
         query_text: str,
-        uid: str | None,
+        document_id: str | None,
     ) -> tuple[SearchResult, ...]:
-        self.calls.append({"query_text": query_text, "uid": uid})
+        self.calls.append({"query_text": query_text, "document_id": document_id})
         if self._error is not None:
             raise self._error
         return self._results
@@ -136,13 +136,15 @@ def test_retrieval_cache_hit_returns_deserialized_results_without_es() -> None:
     cache_key = build_retrieval_cache_key(
         index_name="documents",
         keywords=("нормализация", "база данных"),
-        uid=None,
+        document_id=None,
     )
     fake_redis.values[cache_key] = serialize_search_results((_result(),))
     search_client = FakeSearchClient()
     service = RetrievalService(search_client, _store(fake_redis))
 
-    results = asyncio.run(service.search(intent_decision=_intent_decision(), uid=None))
+    results = asyncio.run(
+        service.search(intent_decision=_intent_decision(), document_id=None)
+    )
 
     assert results == (_result(),)
     assert search_client.calls == []
@@ -155,7 +157,10 @@ def test_retrieval_cache_miss_calls_es_and_stores_results() -> None:
     service = RetrievalService(search_client, _store(fake_redis))
 
     results = asyncio.run(
-        service.search(intent_decision=_intent_decision(), uid="document-uid-123")
+        service.search(
+            intent_decision=_intent_decision(),
+            document_id="document-id-123",
+        )
     )
 
     assert results == search_result
@@ -169,7 +174,9 @@ def test_retrieval_cache_fail_open_on_redis_error() -> None:
     search_client = FakeSearchClient(results=search_result)
     service = RetrievalService(search_client, _store(fake_redis))
 
-    results = asyncio.run(service.search(intent_decision=_intent_decision(), uid=None))
+    results = asyncio.run(
+        service.search(intent_decision=_intent_decision(), document_id=None)
+    )
 
     assert results == search_result
     assert len(search_client.calls) == 1
@@ -180,14 +187,16 @@ def test_invalid_cached_payload_is_deleted_and_replaced() -> None:
     cache_key = build_retrieval_cache_key(
         index_name="documents",
         keywords=("нормализация", "база данных"),
-        uid=None,
+        document_id=None,
     )
     fake_redis.values[cache_key] = "{broken-json"
     search_result = (_result(),)
     search_client = FakeSearchClient(results=search_result)
     service = RetrievalService(search_client, _store(fake_redis))
 
-    results = asyncio.run(service.search(intent_decision=_intent_decision(), uid=None))
+    results = asyncio.run(
+        service.search(intent_decision=_intent_decision(), document_id=None)
+    )
 
     assert results == search_result
     assert fake_redis.delete_calls == [(cache_key,)]
@@ -199,7 +208,9 @@ def test_empty_results_do_not_write_cache_and_keys_change_with_inputs() -> None:
     search_client = FakeSearchClient(results=())
     service = RetrievalService(search_client, _store(fake_redis))
 
-    results = asyncio.run(service.search(intent_decision=_intent_decision(), uid=None))
+    results = asyncio.run(
+        service.search(intent_decision=_intent_decision(), document_id=None)
+    )
 
     assert results == ()
     assert fake_redis.set_calls == []
@@ -207,20 +218,20 @@ def test_empty_results_do_not_write_cache_and_keys_change_with_inputs() -> None:
     base_key = build_retrieval_cache_key(
         index_name="documents",
         keywords=("нормализация", "база данных"),
-        uid=None,
+        document_id=None,
     )
     assert base_key != build_retrieval_cache_key(
         index_name="other-index",
         keywords=("нормализация", "база данных"),
-        uid=None,
+        document_id=None,
     )
     assert base_key != build_retrieval_cache_key(
         index_name="documents",
         keywords=("другие", "слова"),
-        uid=None,
+        document_id=None,
     )
     assert base_key != build_retrieval_cache_key(
         index_name="documents",
         keywords=("нормализация", "база данных"),
-        uid="document-uid-123",
+        document_id="document-id-123",
     )

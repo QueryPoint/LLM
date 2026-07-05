@@ -43,12 +43,12 @@ def build_answer_lock_key(answer_cache_key: str) -> str:
 def build_intent_cache_key(
     *,
     prompt: str | None,
-    uid: str | None,
+    document_id: str | None,
 ) -> str:
     fingerprint = {
         "version": "v1",
         "prompt": _normalize_text(prompt),
-        "uid": _normalize_uid(uid),
+        "document_id": _normalize_document_id(document_id),
     }
     return f"{INTENT_CACHE_PREFIX}{_stable_hash(fingerprint)}"
 
@@ -67,11 +67,11 @@ def _normalize_text(text: str | None) -> str:
     return " ".join(text.strip().lower().split())
 
 
-def _normalize_uid(uid: str | None) -> str | None:
-    if uid is None:
+def _normalize_document_id(document_id: str | None) -> str | None:
+    if document_id is None:
         return None
-    stripped_uid = uid.strip()
-    return stripped_uid or None
+    stripped_document_id = document_id.strip()
+    return stripped_document_id or None
 
 
 def _stable_hash(payload: object) -> str:

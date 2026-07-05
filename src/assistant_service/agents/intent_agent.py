@@ -184,28 +184,42 @@ class IntentAgent:
     def __init__(self, text_generator: TextGenerator | None = None) -> None:
         self._text_generator = text_generator
 
-    async def detect(self, prompt: str, uid: str | None) -> IntentDecision:
+    async def detect(
+        self,
+        prompt: str,
+        document_id: str | None,
+    ) -> IntentDecision:
         if self._text_generator is None:
-            return self.detect_rule_based(prompt=prompt, uid=uid)
+            return self.detect_rule_based(prompt=prompt, document_id=document_id)
 
         try:
             raw_response = await self._text_generator.generate_text(
                 system_instruction=INTENT_SYSTEM_INSTRUCTION,
-                prompt=self._build_classification_prompt(prompt=prompt, uid=uid),
+                prompt=self._build_classification_prompt(
+                    prompt=prompt,
+                    document_id=document_id,
+                ),
                 max_output_tokens=INTENT_MAX_OUTPUT_TOKENS,
                 temperature=INTENT_TEMPERATURE,
             )
-            return self.parse_classification_response(raw_response, uid=uid)
+            return self.parse_classification_response(
+                raw_response,
+                document_id=document_id,
+            )
         except (GeminiClientError, IntentClassificationError) as exc:
             logger.warning(
                 "Intent classification fallback selected: error_type=%s",
                 type(exc).__name__,
             )
-            return self.detect_rule_based(prompt=prompt, uid=uid)
+            return self.detect_rule_based(prompt=prompt, document_id=document_id)
 
-    def detect_rule_based(self, prompt: str, uid: str | None) -> IntentDecision:
+    def detect_rule_based(
+        self,
+        prompt: str,
+        document_id: str | None,
+    ) -> IntentDecision:
         normalized_prompt = self._normalize_prompt(prompt)
-        has_document = uid is not None
+        has_document = document_id is not None
 
         if self._contains_keyword(normalized_prompt, UNSUPPORTED_KEYWORDS):
             return self._build_decision(
@@ -263,7 +277,7 @@ class IntentAgent:
     def parse_classification_response(
         self,
         raw_response: str,
-        uid: str | None,
+        document_id: str | None,
     ) -> IntentDecision:
         try:
             payload = json.loads(self._normalize_json_response(raw_response))
@@ -284,17 +298,24 @@ class IntentAgent:
                 "Intent classifier response failed validation."
             ) from exc
 
-        if self._keywords_required(decision.task_type, uid) and not decision.keywords:
+        if (
+            self._keywords_required(decision.task_type, document_id)
+            and not decision.keywords
+        ):
             raise IntentClassificationError("Intent classifier returned empty keywords.")
 
         return decision
 
     @staticmethod
-    def _build_classification_prompt(*, prompt: str, uid: str | None) -> str:
-        uid_state = "present" if uid is not None else "absent"
+    def _build_classification_prompt(
+        *,
+        prompt: str,
+        document_id: str | None,
+    ) -> str:
+        document_id_state = "present" if document_id is not None else "absent"
         return (
             "КЛАССИФИЦИРУЙ ЗАПРОС.\n"
-            f"uid: {uid_state}\n"
+            f"document_id: {document_id_state}\n"
             "prompt:\n"
             f"{prompt}"
         )
@@ -344,8 +365,13 @@ class IntentAgent:
         return [normalized_prompt[:MAX_KEYWORD_CHARS]]
 
     @staticmethod
-    def _keywords_required(task_type: IntentTaskType, uid: str | None) -> bool:
+    def _keywords_required(
+        task_type: IntentTaskType,
+        document_id: str | None,
+    ) -> bool:
         return task_type not in {
             IntentTaskType.UNSUPPORTED,
             IntentTaskType.SUMMARIZE_DOCUMENT,
-        } or (task_type == IntentTaskType.SUMMARIZE_DOCUMENT and uid is None)
+        } or (
+            task_type == IntentTaskType.SUMMARIZE_DOCUMENT and document_id is None
+        )

@@ -13,13 +13,13 @@ def build_prompt_message(
     *,
     user_id: str = "user-123",
     prompt: str = "Объясни нормализацию",
-    uid: str | None = None,
+    doc: str | None = None,
 ) -> PromptRequestMessage:
     return PromptRequestMessage(
         type=IncomingMessageType.PROMPT,
         user_id=user_id,
         prompt=prompt,
-        uid=uid,
+        doc=doc,
     )
 
 

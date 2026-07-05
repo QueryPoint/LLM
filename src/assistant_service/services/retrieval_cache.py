@@ -12,16 +12,20 @@ def build_retrieval_cache_key(
     *,
     index_name: str,
     keywords: Sequence[str],
-    uid: str | None,
+    document_id: str | None,
 ) -> str:
     normalized_index_name = index_name.strip()
     if normalized_index_name == "":
         raise ValueError("index_name must not be empty")
 
     normalized_keywords = _normalize_keywords(keywords)
-    normalized_uid = _normalize_uid(uid)
+    normalized_document_id = _normalize_document_id(document_id)
     fingerprint = "|".join(
-        (normalized_index_name, " ".join(normalized_keywords), normalized_uid)
+        (
+            normalized_index_name,
+            " ".join(normalized_keywords),
+            normalized_document_id,
+        )
     )
     digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
     return f"{RETRIEVAL_CACHE_PREFIX}{digest}"
@@ -94,12 +98,12 @@ def _normalize_keywords(keywords: Sequence[str]) -> list[str]:
     return normalized_keywords
 
 
-def _normalize_uid(uid: str | None) -> str:
-    if uid is None:
+def _normalize_document_id(document_id: str | None) -> str:
+    if document_id is None:
         return "global"
 
-    normalized_uid = uid.strip()
-    return normalized_uid or "global"
+    normalized_document_id = document_id.strip()
+    return normalized_document_id or "global"
 
 
 def _deserialize_search_result(raw_result: object) -> SearchResult | None:

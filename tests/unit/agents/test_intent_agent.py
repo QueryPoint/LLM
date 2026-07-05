@@ -10,9 +10,6 @@ from assistant_service.agents.intent_agent import (
 from assistant_service.services.gemini_client import GeminiTransientError
 
 
-DOCUMENT_UID = "document-uid-123"
-
-
 class FakeTextGenerator:
     def __init__(self, response: str | Exception) -> None:
         self.calls: list[dict[str, object]] = []
@@ -53,7 +50,7 @@ def test_gemini_json_response_becomes_valid_intent_decision() -> None:
     agent = IntentAgent(text_generator=generator)
 
     decision = asyncio.run(
-        agent.detect(prompt="Объясни нормальные формы баз данных", uid=None)
+        agent.detect(prompt="Объясни нормальные формы баз данных", document_id=None)
     )
 
     assert decision.task_type == IntentTaskType.EXPLAIN_TOPIC
@@ -65,6 +62,7 @@ def test_gemini_json_response_becomes_valid_intent_decision() -> None:
     assert "Верни только один JSON-объект" in str(
         generator.calls[0]["system_instruction"]
     )
+    assert "document_id: absent" in str(generator.calls[0]["prompt"])
 
 
 def test_keywords_are_trimmed_deduplicated_and_invalid_shape_is_rejected() -> None:
@@ -80,7 +78,7 @@ def test_keywords_are_trimmed_deduplicated_and_invalid_shape_is_rejected() -> No
         }
         ```
         """,
-        uid=None,
+        document_id=None,
     )
 
     assert decision.keywords == ["SQL", "СУБД"]
@@ -95,7 +93,7 @@ def test_keywords_are_trimmed_deduplicated_and_invalid_shape_is_rejected() -> No
               "keywords": "SQL, СУБД"
             }
             """,
-            uid=None,
+            document_id=None,
         )
 
 
@@ -106,10 +104,10 @@ def test_invalid_json_or_gemini_error_uses_rule_based_fallback() -> None:
     )
 
     invalid_json_decision = asyncio.run(
-        invalid_json_agent.detect(prompt="Объясни нормализацию", uid=None)
+        invalid_json_agent.detect(prompt="Объясни нормализацию", document_id=None)
     )
     gemini_error_decision = asyncio.run(
-        gemini_error_agent.detect(prompt="Найди лекцию про SQL", uid=None)
+        gemini_error_agent.detect(prompt="Найди лекцию про SQL", document_id=None)
     )
 
     assert invalid_json_decision.task_type == IntentTaskType.EXPLAIN_TOPIC
@@ -120,7 +118,7 @@ def test_invalid_json_or_gemini_error_uses_rule_based_fallback() -> None:
 
 def test_rule_based_fallback_can_return_unsupported() -> None:
     decision = asyncio.run(
-        IntentAgent().detect(prompt="Создай сайт интернет-магазина", uid=None)
+        IntentAgent().detect(prompt="Создай сайт интернет-магазина", document_id=None)
     )
 
     assert decision.task_type == IntentTaskType.UNSUPPORTED

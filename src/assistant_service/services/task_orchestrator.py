@@ -152,6 +152,7 @@ class TaskOrchestrator:
         raise ValueError(f"Unsupported incoming message type: {message.type}")
 
     async def _handle_prompt(self, message: PromptRequestMessage) -> None:
+        document_id = message.doc
         warning = self._calculate_warning(user_prompt=message.prompt)
         if self._is_user_prompt_too_large(message.prompt):
             logger.info("Request rejected by local limit")
@@ -173,7 +174,7 @@ class TaskOrchestrator:
 
         logger.info(
             "Task orchestrator received request: has_document=%s",
-            message.uid is not None,
+            document_id is not None,
         )
         await self._redis_state.set_task_status(
             user_id=message.user_id,
@@ -190,7 +191,7 @@ class TaskOrchestrator:
             "Intent detected: task_type=%s selection_source=%s has_document=%s",
             intent_decision.task_type.value,
             intent_decision.source,
-            message.uid is not None,
+            document_id is not None,
         )
         if intent_decision.task_type == IntentTaskType.UNSUPPORTED:
             await self._publish_response(
@@ -224,7 +225,7 @@ class TaskOrchestrator:
         try:
             search_results = await self._retrieval_service.search(
                 intent_decision=intent_decision,
-                uid=message.uid,
+                document_id=document_id,
             )
         except EXPECTED_RETRIEVAL_ERRORS as exc:
             logger.warning(
@@ -343,7 +344,8 @@ class TaskOrchestrator:
         message: PromptRequestMessage,
         warning: int,
     ) -> None:
-        if message.uid is None:
+        document_id = message.doc
+        if document_id is None:
             await self._publish_response(
                 user_id=message.user_id,
                 data=build_summary_requires_complete_document_response(),
@@ -358,7 +360,7 @@ class TaskOrchestrator:
         )
         try:
             metadata = await self._retrieval_service.get_document_metadata(
-                uid=message.uid,
+                document_id=document_id,
             )
         except EXPECTED_RETRIEVAL_ERRORS as exc:
             logger.warning(
@@ -397,7 +399,7 @@ class TaskOrchestrator:
         try:
             pdf_bytes = await self._document_storage.download_pdf_for_summary(
                 user_id=message.user_id,
-                document_id=message.uid,
+                document_id=document_id,
             )
         except DocumentStorageError as exc:
             logger.warning(
@@ -457,7 +459,10 @@ class TaskOrchestrator:
         await self._publish_think(user_id=message.user_id, data=DELETE_THINK_TEXT)
 
     async def _detect_intent(self, message: PromptRequestMessage) -> IntentDecision:
-        return await self._intent_agent.detect(prompt=message.prompt, uid=message.uid)
+        return await self._intent_agent.detect(
+            prompt=message.prompt,
+            document_id=message.doc,
+        )
 
     async def _publish_think(
         self,

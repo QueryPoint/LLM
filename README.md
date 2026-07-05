@@ -54,23 +54,12 @@ Backend отправляет минимальный payload:
 {
   "type": "prompt",
   "user_id": "user-123",
-  "prompt": "Объясни нормальные формы баз данных",
-  "uid": null
+  "prompt": "Сделай краткое изложение",
+  "doc": "document-id-or-null"
 }
 ```
 
-Для выбранного документа:
-
-```json
-{
-  "type": "prompt",
-  "user_id": "user-123",
-  "prompt": "Какие нормальные формы описаны в документе?",
-  "uid": "document-uid-123"
-}
-```
-
-Backend не передаёт `mode` и `document_context`. Поле `uid` соответствует
+Backend не передаёт `mode` и `document_context`. Поле `doc` соответствует
 Elasticsearch полю `documents.doc_id`.
 
 ## Intent
@@ -120,7 +109,7 @@ user_id
 `user_id` не используется как Elasticsearch filter в текущем sprint. Проверку
 доступа пользователя выполняет backend до отправки RabbitMQ message.
 
-Если `uid` отсутствует, выполняется global search по `text`:
+Если `doc` отсутствует, выполняется global search по `text`:
 
 ```json
 {
@@ -134,7 +123,7 @@ user_id
 }
 ```
 
-Если `uid` передан, поиск ограничивается документом через точный filter:
+Если `doc` передан, поиск ограничивается документом через точный filter:
 
 ```json
 {
@@ -143,7 +132,7 @@ user_id
       "filter": [
         {
           "term": {
-            "doc_id": "document-uid-123"
+            "doc_id": "document-id-123"
           }
         }
       ],
@@ -182,7 +171,7 @@ PDF-документа. Сервис получает `file_name` из Elasticse
 MinIO и передаёт файл в Gemini через Files API. DOCX и другие форматы пока не
 поддерживаются.
 
-Если `uid` не передан:
+Если `doc` не передан:
 
 ```text
 Для подготовки краткого изложения нужен полный текст выбранного документа.
@@ -258,7 +247,7 @@ DOCUMENT_SUMMARY_MAX_FILE_BYTES=20971520
 `DOCUMENT_SUMMARY_MAX_FILE_BYTES` ограничивает размер PDF для production
 full-document summary. Текущий MinIO storage convention является временным
 техническим ограничением LLM-service: объект PDF собирается как
-`<user_id>/<uid>.pdf` после проверки `file_name` из Elasticsearch.
+`<user_id>/<document_id>.pdf` после проверки `file_name` из Elasticsearch.
 
 The document probe is an isolated manual tool and is not part of the RabbitMQ
 worker flow:
@@ -271,7 +260,7 @@ uv run python -m assistant_service.tools.document_probe
 ```
 
 `SPIKE_OBJECT_KEY` is required until backend/Infra defines the mapping from
-`uid` to MinIO object key. The command prints only aggregate status lines and
+`document_id` to MinIO object key. The command prints only aggregate status lines and
 does not print secrets, URLs, object keys, document text or Gemini output.
 
 ## Manual Retrieval Check

@@ -40,7 +40,7 @@ def test_global_search_queries_text_without_doc_filter_and_normalizes_hit() -> N
     fake_client = FakeAsyncElasticsearch(response=_response())
     client = ElasticsearchClient(fake_client, index_name="documents", max_results=8)
 
-    results = asyncio.run(client.search(query_text="нормализация", uid=None))
+    results = asyncio.run(client.search(query_text="нормализация", document_id=None))
 
     assert len(results) == 1
     assert results[0].doc_id == "document-1"
@@ -62,7 +62,7 @@ def test_document_scoped_search_filters_by_doc_id_without_global_fallback() -> N
     client = ElasticsearchClient(fake_client, index_name="documents", max_results=5)
 
     results = asyncio.run(
-        client.search(query_text="нормальные формы", uid="document-uid-123")
+        client.search(query_text="нормальные формы", document_id="document-id-123")
     )
 
     assert results == ()
@@ -71,7 +71,7 @@ def test_document_scoped_search_filters_by_doc_id_without_global_fallback() -> N
     assert body["size"] == 5
     assert body["query"] == {
         "bool": {
-            "filter": [{"term": {"doc_id": "document-uid-123"}}],
+            "filter": [{"term": {"doc_id": "document-id-123"}}],
             "must": [
                 {"match": {"text": {"query": "нормальные формы"}}},
             ],
@@ -87,7 +87,7 @@ def test_document_metadata_lookup_filters_by_doc_id_and_reads_file_name() -> Non
                 "hits": [
                     {
                         "_source": {
-                            "doc_id": "document-uid-123",
+                            "doc_id": "document-id-123",
                             "file_name": " lecture.PDF ",
                         }
                     }
@@ -97,15 +97,17 @@ def test_document_metadata_lookup_filters_by_doc_id_and_reads_file_name() -> Non
     )
     client = ElasticsearchClient(fake_client, index_name="documents", max_results=8)
 
-    metadata = asyncio.run(client.get_document_metadata(uid="document-uid-123"))
+    metadata = asyncio.run(
+        client.get_document_metadata(document_id="document-id-123")
+    )
 
     assert metadata is not None
-    assert metadata.doc_id == "document-uid-123"
+    assert metadata.doc_id == "document-id-123"
     assert metadata.file_name == "lecture.PDF"
     body = fake_client.calls[0]["body"]
     assert body == {
         "size": 1,
         "_source": ["doc_id", "file_name"],
-        "query": {"term": {"doc_id": "document-uid-123"}},
+        "query": {"term": {"doc_id": "document-id-123"}},
     }
     assert "user_id" not in str(body)

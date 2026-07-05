@@ -8,30 +8,46 @@ from assistant_service.messaging.contracts import (
 from tests.fixtures.builders import build_delete_message, build_prompt_message
 
 
-def test_prompt_accepts_minimal_uid_contract() -> None:
+def test_prompt_accepts_doc_contract() -> None:
     message = incoming_message_adapter.validate_python(
         {
             "type": "prompt",
             "user_id": "user-123",
-            "prompt": "Объясни нормализацию баз данных",
-            "uid": " document-uid-123 ",
+            "prompt": "Объясни тему",
+            "doc": " test-document-id ",
         }
     )
 
     expected = build_prompt_message(
-        prompt="Объясни нормализацию баз данных",
-        uid="document-uid-123",
+        prompt="Объясни тему",
+        doc="test-document-id",
     )
     assert message == expected
 
 
-@pytest.mark.parametrize("field_name", ["mode", "document_context", "doc_uid", "request_id", "session_id"])
+def test_prompt_accepts_null_doc() -> None:
+    message = incoming_message_adapter.validate_python(
+        {
+            "type": "prompt",
+            "user_id": "user-123",
+            "prompt": "Объясни нормализацию",
+            "doc": None,
+        }
+    )
+
+    assert message == build_prompt_message(prompt="Объясни нормализацию", doc=None)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["mode", "document_context", "doc_uid", "request_id", "session_id"],
+)
 def test_old_prompt_fields_are_not_accepted(field_name: str) -> None:
     payload: dict[str, object] = {
         "type": "prompt",
         "user_id": "user-123",
         "prompt": "Объясни нормализацию",
-        "uid": None,
+        "doc": None,
         field_name: "legacy",
     }
 
@@ -39,7 +55,32 @@ def test_old_prompt_fields_are_not_accepted(field_name: str) -> None:
         incoming_message_adapter.validate_python(payload)
 
 
-def test_delete_is_valid_without_prompt_or_uid() -> None:
+def test_prompt_rejects_uid_field_only() -> None:
+    with pytest.raises(ValidationError):
+        incoming_message_adapter.validate_python(
+            {
+                "type": "prompt",
+                "user_id": "user-123",
+                "prompt": "Объясни нормализацию",
+                "uid": "legacy-document-id",
+            }
+        )
+
+
+def test_prompt_rejects_doc_and_uid_together() -> None:
+    with pytest.raises(ValidationError):
+        incoming_message_adapter.validate_python(
+            {
+                "type": "prompt",
+                "user_id": "user-123",
+                "prompt": "Объясни нормализацию",
+                "doc": "document-id-123",
+                "uid": "legacy-document-id",
+            }
+        )
+
+
+def test_delete_is_valid_without_prompt_or_doc() -> None:
     message = incoming_message_adapter.validate_python(
         {
             "type": "delete",
@@ -74,3 +115,5 @@ def test_outgoing_events_keep_string_payloads_and_no_extra_fields() -> None:
     assert response.warning == 125
     assert set(think.model_dump().keys()) == {"type", "user_id", "data"}
     assert set(response.model_dump().keys()) == {"type", "user_id", "data", "warning"}
+    assert "doc" not in think.model_dump()
+    assert "doc" not in response.model_dump()
