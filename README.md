@@ -227,6 +227,31 @@ RETRIEVAL_CACHE_TTL_SECONDS=900
 ELASTICSEARCH_URL=http://localhost:9200
 ```
 
+MinIO/Gemini document probe settings:
+
+```env
+MINIO_ENDPOINT=
+MINIO_BUCKET=
+MINIO_ACCESS_KEY=
+MINIO_SECRET_KEY=
+MINIO_SECURE=false
+MINIO_SPIKE_ENABLED=false
+```
+
+The document probe is an isolated manual tool and is not part of the RabbitMQ
+worker flow:
+
+```bash
+MINIO_SPIKE_ENABLED=true \
+SPIKE_DOCUMENT_UID=<test-uid> \
+SPIKE_OBJECT_KEY=<test-object-key> \
+uv run python -m assistant_service.tools.document_probe
+```
+
+`SPIKE_OBJECT_KEY` is required until backend/Infra defines the mapping from
+`uid` to MinIO object key. The command prints only aggregate status lines and
+does not print secrets, URLs, object keys, document text or Gemini output.
+
 ## Manual Retrieval Check
 
 Index `documents` может быть пустым. Для ручной E2E проверки backend должен:
