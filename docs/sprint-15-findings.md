@@ -34,65 +34,43 @@ Gemini output should be written to logs or reports.
 
 ## Probe Methods
 
-The implemented manual probe can check:
+The implemented manual probe checks:
 
 | Method | Status | Notes |
 | --- | --- | --- |
-| Gemini Files API | implemented, unverified with real object | Downloads MinIO bytes to a temporary local file, uploads it to Gemini Files API, waits for readiness and deletes the remote Gemini file best effort. |
-| Inline PDF bytes | implemented, unverified with real object | Limited to small PDFs. It sends `application/pdf` bytes directly through `Part.from_bytes`. |
-| Presigned URL | implemented as controlled experiment | Disabled unless explicitly enabled. Internal `minio:9000` or localhost URLs are treated as not externally reachable. |
+| Gemini Files API | validated for PDF, failed for DOCX | Downloads MinIO bytes to a temporary local file, uploads it to Gemini Files API, waits for readiness and deletes the remote Gemini file best effort. |
+| Inline PDF bytes | validated for PDF, not applicable for DOCX | Limited to small PDFs. It sends `application/pdf` bytes directly through `Part.from_bytes`. |
+| Presigned URL | not enabled | Kept disabled for this spike and not used for the recommendation. |
 
 ## Manual Command
 
-```bash
-MINIO_SPIKE_ENABLED=true \
-SPIKE_DOCUMENT_UID=<test-uid> \
-SPIKE_OBJECT_KEY=<test-object-key> \
-uv run python -m assistant_service.tools.document_probe
-```
-
-The command refuses to run when:
-
-```text
-MINIO_SPIKE_ENABLED != true
-SPIKE_DOCUMENT_UID is missing
-SPIKE_OBJECT_KEY is missing
-MinIO settings are incomplete
-GEMINI_API_KEY is missing
-```
+The manual probe was run against a test PDF and a test DOCX object selected from the local MinIO-backed backend flow. The command refused to print secrets, object keys or document text.
 
 ## PDF Result
 
 | format | file size | MinIO download success | Gemini input method | Gemini request success | summary quality | cleanup success | recommended for production | failure reason |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| pdf | not tested | not tested | Files API / inline bytes / presigned URL | not tested | not evaluated | not tested | no | no test object and no uid-to-object-key convention |
+| pdf | < 1 MB | success | Files API | success | acceptable for this spike | best effort | yes | none |
 
 ## DOCX Result
 
 | format | file size | MinIO download success | Gemini input method | Gemini request success | summary quality | cleanup success | recommended for production | failure reason |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| docx | not tested | not tested | Files API / presigned URL | not tested | not evaluated | not tested | no | no test object and no uid-to-object-key convention |
+| docx | < 1 MB | success | Files API | failed with `ClientError` | not evaluated | best effort | no | Gemini Files API was not stable for DOCX in this validation |
 
 ## Recommendation
 
-Chosen option for now:
+Chosen option:
 
 ```text
-D. Не внедрять Gemini full-file summary пока нет надёжного способа
+B. Files API only for PDF; DOCX through backend text extraction / conversion to PDF.
 ```
-
-This is a conservative decision based on the actual Sprint-15 state: the probe
-code exists, but real PDF/DOCX checks were not executed because the repository
-does not define MinIO connection values or the `uid` to object key rule.
 
 Before Sprint-16, backend/Infra must provide:
 
 ```text
-1. MinIO endpoint reachable from LLM-service in Docker.
-2. Local MinIO endpoint for manual runs.
-3. Bucket name.
-4. Safe credentials delivery through environment variables.
-5. Exact uid -> object key rule or metadata lookup contract.
-6. One explicit test PDF object.
-7. One explicit test DOCX object, if DOCX summary remains in scope.
+1. LLM-service must not derive MinIO object keys from user_id/doc_id/doc_type.
+2. Backend must provide one stable internal file-access contract for an authorized uid.
+3. Preferred contract: internal backend endpoint returning file bytes/stream.
+4. Acceptable contract: metadata lookup returning storage_key and mime_type.
 ```
