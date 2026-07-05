@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 
@@ -511,7 +512,7 @@ def test_summary_pdf_flow_returns_gemini_summary_with_single_response() -> None:
     assert pdf_summary_service.calls == [b"%PDF-1.4 content"]
 
 
-def test_summary_minio_error_returns_controlled_fallback_without_requeue() -> None:
+def test_summary_minio_error_returns_controlled_fallback_without_requeue(caplog: pytest.LogCaptureFixture) -> None:
     from assistant_service.services.minio_storage import DocumentStorageUnavailableError
 
     publisher = FakePublisher()
@@ -531,12 +532,19 @@ def test_summary_minio_error_returns_controlled_fallback_without_requeue() -> No
         pdf_summary_service=pdf_summary_service,
     )
 
-    asyncio.run(orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID)))
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            orchestrator.handle(_prompt_message(prompt="Сделай summary", uid=DOCUMENT_UID))
+        )
 
     assert publisher.events[-1].type == OutgoingEventType.RESPONSE
     assert publisher.events[-1].data == build_document_summary_unavailable_response()
     assert document_storage.calls == [(USER_ID, DOCUMENT_UID)]
     assert pdf_summary_service.calls == []
+    assert USER_ID not in caplog.text
+    assert DOCUMENT_UID not in caplog.text
+    assert "lecture.pdf" not in caplog.text
+    assert "%PDF" not in caplog.text
 
 
 def test_expected_elasticsearch_error_returns_retrieval_unavailable_response() -> None:

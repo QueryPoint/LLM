@@ -2,7 +2,11 @@ import asyncio
 
 import pytest
 
-from assistant_service.services.gemini_client import GeminiClient, GeminiRequestLimitError
+from assistant_service.services.gemini_client import (
+    GeminiClient,
+    GeminiRequestLimitError,
+    GeminiTransientError,
+)
 
 
 class FakeResponse:
@@ -62,6 +66,59 @@ class FakeSdkClient:
         generate_results: list[object] | None = None,
     ) -> None:
         self.aio = FakeAioClient(stream_fragments, generate_results)
+
+
+class FakeSummaryUploadedFile:
+    def __init__(self, state: str) -> None:
+        self.name = "files/test"
+        self.state = state
+
+
+class FakeSummaryFiles:
+    def __init__(self, uploaded_file: FakeSummaryUploadedFile) -> None:
+        self._uploaded_file = uploaded_file
+        self.delete_calls: list[str] = []
+
+    async def upload(self, *, file: str, config: object = None) -> FakeSummaryUploadedFile:
+        return self._uploaded_file
+
+    async def get(self, *, name: str) -> FakeSummaryUploadedFile:
+        return self._uploaded_file
+
+    async def delete(self, *, name: str) -> None:
+        self.delete_calls.append(name)
+
+
+class FakeSummaryModels:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def generate_content(self, **kwargs: object) -> object:
+        raise self._error
+
+
+class FakeSummaryAioClient:
+    def __init__(
+        self,
+        *,
+        uploaded_file: FakeSummaryUploadedFile,
+        error: Exception,
+    ) -> None:
+        self.files = FakeSummaryFiles(uploaded_file)
+        self.models = FakeSummaryModels(error)
+
+    async def aclose(self) -> None:
+        return None
+
+
+class FakeSummarySdkClient:
+    def __init__(
+        self,
+        *,
+        uploaded_file: FakeSummaryUploadedFile,
+        error: Exception,
+    ) -> None:
+        self.aio = FakeSummaryAioClient(uploaded_file=uploaded_file, error=error)
 
 
 def _client(
@@ -224,3 +281,84 @@ def test_stream_text_preserves_fragment_boundaries() -> None:
         ]
 
     assert asyncio.run(collect()) == ["Привет ", "мир", "!"]
+
+
+def test_summarize_pdf_document_cleans_up_on_failure_and_timeout() -> None:
+    failure_client = _client(retry_max_attempts=1)
+    failure_client._client = FakeSummarySdkClient(
+        uploaded_file=FakeSummaryUploadedFile(state="ACTIVE"),
+        error=FakeStatusError(500),
+    )
+
+    with pytest.raises(GeminiTransientError):
+        asyncio.run(
+            failure_client.summarize_pdf_document(
+                data=b"%PDF-1.4",
+                prompt="Составь краткое структурированное изложение документа.",
+            )
+        )
+
+    assert failure_client._client.aio.files.delete_calls == ["files/test"]
+
+    timeout_client = _client()
+    timeout_client._client = FakeSummarySdkClient(
+        uploaded_file=FakeSummaryUploadedFile(state="PROCESSING"),
+        error=FakeStatusError(500),
+    )
+    timeout_client._timeout_seconds = 0.001
+
+    async def fake_sleep(delay: float) -> None:
+        return None
+
+    timeout_client._sleep = fake_sleep
+
+    with pytest.raises(GeminiTransientError):
+        asyncio.run(
+            timeout_client.summarize_pdf_document(
+                data=b"%PDF-1.4",
+                prompt="Составь краткое структурированное изложение документа.",
+            )
+        )
+
+    assert timeout_client._client.aio.files.delete_calls == ["files/test"]
+
+
+def test_summarize_pdf_document_cleans_up_on_failure_and_timeout() -> None:
+    failure_client = _client()
+    failure_client._retry_max_attempts = 1
+    failure_client._client = FakeSummarySdkClient(
+        uploaded_file=FakeSummaryUploadedFile(state="ACTIVE"),
+        error=FakeStatusError(500),
+    )
+
+    with pytest.raises(GeminiTransientError):
+        asyncio.run(
+            failure_client.summarize_pdf_document(
+                data=b"%PDF-1.4",
+                prompt="Составь краткое структурированное изложение документа.",
+            )
+        )
+
+    assert failure_client._client.aio.files.delete_calls == ["files/test"]
+
+    timeout_client = _client()
+    timeout_client._client = FakeSummarySdkClient(
+        uploaded_file=FakeSummaryUploadedFile(state="PROCESSING"),
+        error=FakeStatusError(500),
+    )
+    timeout_client._timeout_seconds = 0.001
+
+    async def fake_sleep(delay: float) -> None:
+        return None
+
+    timeout_client._sleep = fake_sleep
+
+    with pytest.raises(GeminiTransientError):
+        asyncio.run(
+            timeout_client.summarize_pdf_document(
+                data=b"%PDF-1.4",
+                prompt="Составь краткое структурированное изложение документа.",
+            )
+        )
+
+    assert timeout_client._client.aio.files.delete_calls == ["files/test"]

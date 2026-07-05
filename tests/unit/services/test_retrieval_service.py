@@ -192,3 +192,35 @@ def test_invalid_cached_payload_is_deleted_and_replaced() -> None:
     assert results == search_result
     assert fake_redis.delete_calls == [(cache_key,)]
     assert fake_redis.set_calls[-1]["ex"] == 900
+
+
+def test_empty_results_do_not_write_cache_and_keys_change_with_inputs() -> None:
+    fake_redis = FakeRedisClient()
+    search_client = FakeSearchClient(results=())
+    service = RetrievalService(search_client, _store(fake_redis))
+
+    results = asyncio.run(service.search(intent_decision=_intent_decision(), uid=None))
+
+    assert results == ()
+    assert fake_redis.set_calls == []
+
+    base_key = build_retrieval_cache_key(
+        index_name="documents",
+        keywords=("нормализация", "база данных"),
+        uid=None,
+    )
+    assert base_key != build_retrieval_cache_key(
+        index_name="other-index",
+        keywords=("нормализация", "база данных"),
+        uid=None,
+    )
+    assert base_key != build_retrieval_cache_key(
+        index_name="documents",
+        keywords=("другие", "слова"),
+        uid=None,
+    )
+    assert base_key != build_retrieval_cache_key(
+        index_name="documents",
+        keywords=("нормализация", "база данных"),
+        uid="document-uid-123",
+    )
