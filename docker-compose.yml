@@ -1,0 +1,47 @@
+services:
+  assistant-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: querypoint_assistant_service
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override connection URLs to use Docker network hostnames
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@querypoint_rabbitmq:5672/${RABBITMQ_VHOST:-}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@querypoint_redis:6379/0
+    depends_on:
+      - rabbitmq-check
+      - redis-check
+      - elasticsearch-check
+    networks:
+      - querypoint
+
+  # Lightweight containers that just wait for the Infra services to be healthy
+  # before assistant-service starts. They exit immediately after the check.
+  rabbitmq-check:
+    image: busybox:latest
+    command: >
+      sh -c "until nc -z querypoint_rabbitmq 5672; do echo waiting for rabbitmq; sleep 2; done"
+    networks:
+      - querypoint
+
+  redis-check:
+    image: busybox:latest
+    command: >
+      sh -c "until nc -z querypoint_redis 6379; do echo waiting for redis; sleep 2; done"
+    networks:
+      - querypoint
+
+  elasticsearch-check:
+    image: busybox:latest
+    command: >
+      sh -c "until nc -z querypoint_elasticsearch 9200; do echo waiting for elasticsearch; sleep 2; done"
+    networks:
+      - querypoint
+
+networks:
+  querypoint:
+    external: true
+    name: querypoint_network
