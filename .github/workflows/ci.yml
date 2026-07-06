@@ -24,7 +24,7 @@ jobs:
         run: uvx ruff check src
 
       - name: Test
-        run: uv run pytest tests --cov=src --cov-report=term-missing
+        run: uv run pytest tests
 
   build:
     needs: lint-and-test
