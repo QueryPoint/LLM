@@ -37,12 +37,13 @@ class FakeTextGenerator:
 
 
 def test_gemini_json_response_becomes_valid_intent_decision() -> None:
+    # Реальный контракт: Gemini присылает только task_type и keywords (см.
+    # INTENT_SYSTEM_INSTRUCTION) — requires_retrieval/requires_full_document
+    # вычисляются из task_type в _build_decision, модель их не возвращает.
     generator = FakeTextGenerator(
         """
         {
           "task_type": "explain_topic",
-          "requires_retrieval": false,
-          "requires_full_document": true,
           "keywords": [" нормальные формы ", "нормализация баз данных"]
         }
         """
@@ -66,14 +67,16 @@ def test_gemini_json_response_becomes_valid_intent_decision() -> None:
 
 
 def test_keywords_are_trimmed_deduplicated_and_invalid_shape_is_rejected() -> None:
+    # Регрессионный тест: реальный Gemini часто оборачивает JSON в
+    # ```json ... ``` и никогда не возвращает requires_retrieval/
+    # requires_full_document — раньше это валило AI-классификацию в 100%
+    # случаев и всегда откатывалось на rule_based, никто не замечал.
     agent = IntentAgent()
     decision = agent.parse_classification_response(
         """
         ```json
         {
           "task_type": "answer_question",
-          "requires_retrieval": true,
-          "requires_full_document": false,
           "keywords": [" SQL ", "sql", "СУБД"]
         }
         ```
@@ -81,6 +84,10 @@ def test_keywords_are_trimmed_deduplicated_and_invalid_shape_is_rejected() -> No
         document_id=None,
     )
 
+    assert decision.task_type == IntentTaskType.ANSWER_QUESTION
+    assert decision.requires_retrieval is True
+    assert decision.requires_full_document is False
+    assert decision.source == "gemini_json"
     assert decision.keywords == ["SQL", "СУБД"]
 
     with pytest.raises(IntentClassificationError):
@@ -88,11 +95,22 @@ def test_keywords_are_trimmed_deduplicated_and_invalid_shape_is_rejected() -> No
             """
             {
               "task_type": "answer_question",
-              "requires_retrieval": true,
-              "requires_full_document": false,
               "keywords": "SQL, СУБД"
             }
             """,
+            document_id=None,
+        )
+
+
+def test_gemini_response_missing_or_invalid_task_type_is_rejected() -> None:
+    agent = IntentAgent()
+
+    with pytest.raises(IntentClassificationError):
+        agent.parse_classification_response('{"keywords": ["SQL"]}', document_id=None)
+
+    with pytest.raises(IntentClassificationError):
+        agent.parse_classification_response(
+            '{"task_type": "not_a_real_type", "keywords": ["SQL"]}',
             document_id=None,
         )
 

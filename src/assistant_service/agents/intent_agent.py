@@ -291,8 +291,31 @@ class IntentAgent:
                 "Intent classifier response must be an object."
             )
 
+        # Gemini is only ever asked for `task_type` and `keywords` (see
+        # INTENT_SYSTEM_INSTRUCTION); `requires_retrieval`/`requires_full_document`
+        # are derived from task_type, same as the rule-based path — they are not
+        # part of the model's JSON contract and must not be required from it here.
         try:
-            decision = IntentDecision.model_validate(payload)
+            task_type = IntentTaskType(payload.get("task_type"))
+        except ValueError as exc:
+            raise IntentClassificationError(
+                "Intent classifier returned invalid task_type."
+            ) from exc
+
+        keywords = payload.get("keywords")
+        if not isinstance(keywords, list) or not all(
+            isinstance(keyword, str) for keyword in keywords
+        ):
+            raise IntentClassificationError(
+                "Intent classifier returned invalid keywords."
+            )
+
+        try:
+            decision = self._build_decision(
+                task_type=task_type,
+                keywords=keywords,
+                source="gemini_json",
+            )
         except ValidationError as exc:
             raise IntentClassificationError(
                 "Intent classifier response failed validation."
